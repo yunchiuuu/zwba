@@ -12,12 +12,17 @@ Location:
     ~/Zebrafish-whole-brain-analysis/chemogenetic/config/EXPERIMENT_NAME.py
 """
 
+import os
+
 # ============================================================
 # BASE PATHS  (shared across all chemogenetic experiments)
 # ============================================================
 dir_voluseg      = "/resnick/groups/Proberlab/yun/lightsheet/"
 dir_registration = "/resnick/groups/Proberlab/yun/lightsheet/analysis_output/registration/"
 dir_analysis     = "/resnick/groups/Proberlab/yun/lightsheet/analysis_output/chemogenetic/"
+
+# Python interpreter used by every submit_*.sh (they read PYTHON_BIN from this config).
+PYTHON_BIN = os.path.expanduser("~/miniconda3/envs/voluseg/bin/python")   # <- your conda env
 
 
 # ============================================================
@@ -58,67 +63,86 @@ rotation_k = 2                         # 180° rotation for mapzebrain alignment
 
 
 # ============================================================
-# DRUG PERFUSION  (CSTR model: dC/dt = (Q/V)(Cin - C))
+# DRUG PERFUSION  (recorded in RUN_META only — the GLM regressor is regressor_files below)
 # ============================================================
-drug_uM  = None    # TODO: e.g. 10.0
+drug_uM  = None    # TODO: e.g. 10.0 (may stay None if you do not use a drug concentration)
 V_ml     = 15.0
 Q_ml_min = 4.5
 
-# NOTE: if fish within this experiment were run at different concentrations,
-# add a per-fish lookup dict here:
-#   drug_uM_per_fish = {
-#       (EXPT_PROJ, "260113_..._fish1"): 5.0,
-#       ...
-#   }
-# and use it in run_spearman.py / run_glm.py instead of drug_uM.
-
-# Epoch windows in FRAMES (minutes * 60 * volume_per_sec)
-# TODO: adjust for your experiment duration
+# Phase boundaries in FRAMES (minutes * 60 * volume_per_sec); end of a phase is exclusive.
+# TODO: adjust for your experiment. Phases must be contiguous and wash_end must equal the
+# number of volumes in the recording (run_decompose checks this for every fish).
 baseline_start = 0  * 60 * volume_per_sec
 baseline_end   = 45 * 60 * volume_per_sec
 
-drug_start = 46 * 60 * volume_per_sec
-drug_end   = 90 * 60 * volume_per_sec   # TODO: 90 or 120?
+drug_start = 45 * 60 * volume_per_sec
+drug_end   = 90 * 60 * volume_per_sec
 
-wash_start = 91  * 60 * volume_per_sec
-wash_end   = 120 * 60 * volume_per_sec  # TODO: match total duration
+wash_start = 90  * 60 * volume_per_sec
+wash_end   = 120 * 60 * volume_per_sec  # = total number of volumes at 1 vol/s
+
+
+# ============================================================
+# ANALYSIS EPOCHS  — one rule for every effect-size summary (ΔZ, d′, figures, responder sign)
+# ============================================================
+# Discard the first EPOCH_DISCARD_MIN of each phase (fish settling / habituation):
+#   baseline summary window = [baseline_start + discard, baseline_end)
+#   drug     summary window = [drug_start     + discard, drug_end)
+# The seven 15-min temporal windows (epoch_dz / epoch_dprime maps) start at drug onset and
+# are compared with the same baseline window. Defined in chemogenetic/epochs.py.
+# The GLM fit window follows the same rule: INCLUDED_BASELINE (below) is the baseline minutes before
+# drug onset that enter the fit, so the fit starts where the baseline summary window starts
+# (45 - EPOCH_DISCARD_MIN = 25 for this design). The fit runs to the end of the recording.
+EPOCH_DISCARD_MIN = 20
 
 
 # ============================================================
 # DECOMPOSITION  (F → F_tonic + F_phasic)
 # ============================================================
-df_f_percentile     = 20               # default
 f_tonic_window_size = 600              # seconds; default
 f_tonic_percentile  = 20               # default
 
 
 # ============================================================
-# PERMUTATION TEST + BH-FDR
-# ============================================================
-p_thresh_permutation   = 0.005         # default
-n_resample_permutation = 500           # default
-BH_Q = 0.05                            # default
-
-
-# ============================================================
 # TONIC GLM
 # ============================================================
-input_tag    = "C"                     # "C" or "dC" — TODO: confirm for this drug
+input_tag    = "HCRT"                  # label of the user-defined regressor (names glm/inHCRT_K...). Keep "HCRT".
 K_global     = 600                     # kernel length (frames); default
 drift_global = 1                       # polynomial drift order; default
 lam_global   = 0.5                     # ridge penalty; default
 lag_global   = 0                       # causal lag (frames); default
 
-INCLUDED_BASELINE     = 15.0           # minutes of baseline in GLM fit window
+# Minutes of baseline in the GLM fit window. Must reach back at least to the start of the
+# baseline summary window (baseline_start + EPOCH_DISCARD_MIN), because the responder sign
+# is read from that window. Rule: baseline length - EPOCH_DISCARD_MIN (45 - 20 = 25 here).
+INCLUDED_BASELINE     = 25.0   # minutes of baseline before drug onset in the GLM fit (= baseline length - EPOCH_DISCARD_MIN)
 CLIP_ABS_DZ           = 50.0           # |ΔZ| clipping threshold
 NULL_TAG              = "iaaft"        # "iaaft" or "shift"
-RESPONDER_NULL_THRESH = 95             # null percentile for responder cutoff
-L_MIN                 = 20.0           # plateau duration (minutes) for plateau-ΔZ
+RESPONDER_NULL_THRESH = 99             # null percentile for responder cutoff (all consumers read this)
+PHASIC_RESPONDER_NULL_THRESH = 99          # IAAFT null percentile for the phasic d' responder validation
 
 # Derived: subfolder name for all GLM outputs (do not edit manually)
 param_folder_name = (
     f"in{input_tag}_K{K_global}_drift{drift_global}_lam{lam_global}_lag{lag_global}"
 )
+
+
+# ============================================================
+# TONIC GLM REGRESSOR  — defined by YOU; REQUIRED (there is no fallback)
+# ============================================================
+# The GLM kernel is fit to this trace. run_glm.py stops with an error if it cannot be
+# read. One CSV per reference recording; `regressor_column` is the raw trace (one value
+# per volume, at least wash_end volumes). With "tonic_zscore" each trace becomes F_tonic
+# (centered rolling percentile), is z-scored on [0, drug_start) and averaged across files
+# (as in hcrt_regressor.ipynb); "none" uses the column as it is (e.g. a measured trace).
+# input_tag (above) is only the label that names the GLM output folder (inHCRT_K600_...).
+regressor_files = [
+    # TODO: "/resnick/groups/Proberlab/<you>/lightsheet/<proj>/<expt>/hcrt_all.csv",
+]
+regressor_column         = "Mean"
+regressor_preprocess     = "tonic_zscore"   # or "none"
+regressor_tonic_window   = 600              # volumes
+regressor_tonic_quantile = 0.20
 
 
 # ============================================================

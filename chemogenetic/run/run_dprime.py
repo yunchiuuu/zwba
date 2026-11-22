@@ -17,17 +17,28 @@ Figures saved to:
         phasic_responder_fractions_{mode}.pdf
         phasic_dprime_amplitude_{mode}.pdf
 
+Epochs: baseline = [baseline_start + EPOCH_DISCARD_MIN, baseline_end), drug =
+[drug_start + EPOCH_DISCARD_MIN, drug_end) — read from the config (chemogenetic/epochs.py).
+
+Stages (default: dprime,null,responders,figures; existing outputs are skipped unless
+listed in --overwrite):
+    --stages dprime,null,responders,figures
+    --overwrite responders            (default; the idx must follow the current null)
+
 Usage
 -----
-    sbatch submit_dprime.sh
+    bash chemogenetic/submit/submit_dprime.sh --config config_hcrt_trpv1_csn_120min
     # or interactively:
-    python run_dprime.py --config config_hcrt_trpv1_csn_120min
+    python chemogenetic/run/run_dprime.py --config config_hcrt_trpv1_csn_120min
+
+Failures are reported with tracebacks and the job exits 1 if any fish/stage failed.
 
 Location:
     ~/Zebrafish-whole-brain-analysis/chemogenetic/run/run_dprime.py
 """
 import argparse
 import sys
+import traceback
 from pathlib import Path
 
 import matplotlib
@@ -42,10 +53,27 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
+VALID_STAGES = ("dprime", "null", "responders", "figures")
 parser = argparse.ArgumentParser()
 parser.add_argument("--config", required=True,
                     help="Config module under chemogenetic/config/")
-args, _ = parser.parse_known_args()
+parser.add_argument("--stages", default="dprime,null,responders,figures",
+                    help=f"comma list from {VALID_STAGES}")
+parser.add_argument("--overwrite", default="responders",
+                    help="comma list of stages to recompute even if outputs exist")
+args = parser.parse_args()
+
+
+def _stage_set(text, flag):
+    out = {t.strip() for t in text.split(",") if t.strip()}
+    bad = out - set(VALID_STAGES)
+    if bad:
+        parser.error(f"{flag}: unknown stage(s) {sorted(bad)}; valid: {VALID_STAGES}")
+    return out
+
+
+STAGES = _stage_set(args.stages, "--stages")
+OVERWRITE_STAGES = _stage_set(args.overwrite, "--overwrite")
 
 import importlib
 cfg = importlib.import_module(f"chemogenetic.config.{args.config}")
@@ -72,13 +100,18 @@ from chemogenetic.dprime import (
     compute_ctrl_pooled_threshold,
 )
 from utils.data_io import fish_dir
+from utils.run_guard import RunGuard, guarded, require_paths, run_main, setup_or_exit
+from chemogenetic.epochs import get_epochs
+
+# Analysis epochs (config-driven): first EPOCH_DISCARD_MIN of each phase discarded.
+EPOCHS = setup_or_exit(get_epochs, cfg)
 
 # ============================================================
 # SETTINGS
 # ============================================================
-OVERWRITE      = False
+OVERWRITE      = "dprime" in OVERWRITE_STAGES
 AMPLITUDE_MODE = "raw"    # "raw" (signed, recommended), "abs", or "rms"
-OFFSET_SEC     = 20 * 60  # skip first 20 min of each epoch window (habituation)
+OFFSET_SEC     = EPOCHS.discard_frames / sampling_rate_hz   # seconds skipped at the start of each phase
 VAR_FLOOR      = 1e-4
 EPS_VAR        = 1e-8
 CLIP_ABS       = None
@@ -93,10 +126,12 @@ DPRIME_POS_THRESH = +0.5
 DPRIME_NEG_THRESH = -0.5
 
 # ── IAAFT null stage toggles ────────────────────────────────
-RUN_IAAFT_NULL   = False
-RUN_RESPONDERS   = True
-OVERWRITE_NULL       = False
-OVERWRITE_RESPONDERS = True   # always overwrite so idx reflect current null
+RUN_DPRIME       = "dprime" in STAGES
+RUN_IAAFT_NULL   = "null" in STAGES
+RUN_RESPONDERS   = "responders" in STAGES
+RUN_FIGURES      = "figures" in STAGES
+OVERWRITE_NULL       = "null" in OVERWRITE_STAGES
+OVERWRITE_RESPONDERS = "responders" in OVERWRITE_STAGES   # default True so idx reflect the current null
 
 RESPONDER_NULL_THRESH = getattr(cfg, "PHASIC_RESPONDER_NULL_THRESH", 99)  # percentile, matches GLM convention
 N_SURROGATES  = 200
@@ -107,25 +142,23 @@ N_CELLS_NULL  = 20000
 # ============================================================
 # WORKER
 # ============================================================
+@guarded
 def _run_one(fish):
-    try:
-        return dprime_one_fish(
-            fish=fish,
-            dir_analysis=dir_analysis,
-            baseline_start=baseline_start,  # offset_sec handles 20-min skip
-            baseline_end=baseline_end,
-            drug_start=drug_start,
-            drug_end=DRUG_END_EXTENDED,
-            sampling_rate_hz=sampling_rate_hz,
-            offset_sec=OFFSET_SEC,          # skip first 20 min of each epoch
-            amplitude_mode=AMPLITUDE_MODE,
-            var_floor=VAR_FLOOR,
-            eps_var=EPS_VAR,
-            clip_abs=CLIP_ABS,
-            overwrite=OVERWRITE,
-        )
-    except Exception as e:
-        return {"fish": fish, "status": f"ERROR: {e}"}
+    return dprime_one_fish(
+        fish=fish,
+        dir_analysis=dir_analysis,
+        baseline_start=baseline_start,  # offset_sec applies the EPOCH_DISCARD_MIN skip
+        baseline_end=baseline_end,
+        drug_start=drug_start,
+        drug_end=DRUG_END_EXTENDED,
+        sampling_rate_hz=sampling_rate_hz,
+        offset_sec=OFFSET_SEC,          # skip first EPOCH_DISCARD_MIN of each epoch
+        amplitude_mode=AMPLITUDE_MODE,
+        var_floor=VAR_FLOOR,
+        eps_var=EPS_VAR,
+        clip_abs=CLIP_ABS,
+        overwrite=OVERWRITE,
+    )
 
 
 # ============================================================
@@ -582,30 +615,41 @@ def plot_iaaft_responder_amplitude(ctrl_fish_list, expt_fish_list, fig_dir, ptag
 # MAIN
 # ============================================================
 def main():
+    guard = RunGuard("dprime")
     print(f"Running d′ for {len(all_fish)} fish (n_jobs={N_JOBS})")
     print(f"  dir_analysis   : {dir_analysis}")
     print(f"  amplitude_mode : {AMPLITUDE_MODE}")
-    print(f"  offset_sec     : {OFFSET_SEC // 60} min")
-    print(f"  baseline       : frames [{baseline_start}, {baseline_end})")
-    print(f"  drug           : frames [{drug_start}, {DRUG_END_EXTENDED})")
+    print(f"  stages         : {sorted(STAGES)}   overwrite: {sorted(OVERWRITE_STAGES)}")
+    print(f"  epochs         : {EPOCHS.describe()}")
+    print(f"  offset_sec     : {OFFSET_SEC / 60:g} min skipped at the start of each phase")
+    print(f"  baseline       : frames [{baseline_start}, {baseline_end})  (+ offset)")
+    print(f"  drug           : frames [{drug_start}, {DRUG_END_EXTENDED})  (+ offset)")
     print()
 
-    # ── Compute d′ ───────────────────────────────────────────
-    results = Parallel(n_jobs=N_JOBS, backend="loky")(
-        delayed(_run_one)(fish) for fish in tqdm(all_fish, desc="d′ (fish)")
+    require_paths(
+        [(fish_dir(dir_analysis, f) / "f_phasic.npy", "run run_decompose.py first")
+         for f in all_fish],
+        "d′ input F_phasic",
     )
 
-    print("\n── Summary ──────────────────────────────")
-    for r in results:
-        status = r["status"]
-        if status == "ok":
-            print(
-                f"  {r['fish'][1]:50s}  "
-                f"mean={r['mean']:+.3f}  median={r['median']:+.3f}  "
-                f"n={r['n_cells']}"
-            )
-        else:
-            print(f"  {r['fish'][1]:50s}  {status}")
+    # ── Compute d′ ───────────────────────────────────────────
+    if RUN_DPRIME:
+        results = Parallel(n_jobs=N_JOBS, backend="loky")(
+            delayed(_run_one)(fish) for fish in tqdm(all_fish, desc="d′ (fish)")
+        )
+
+        print("\n── Summary ──────────────────────────────")
+        for r in results:
+            status = r["status"]
+            if status == "ok":
+                print(
+                    f"  {r['fish'][1]:50s}  "
+                    f"mean={r['mean']:+.3f}  median={r['median']:+.3f}  "
+                    f"n={r['n_cells']}"
+                )
+            else:
+                print(f"  {r['fish'][1]:50s}  {status}")
+        guard.record_results("dprime", results)
 
     # ── IAAFT null (window-label permutation, ctrl fish only) ───
     # Only ctrl fish need per-fish null distributions; the pooled ctrl
@@ -633,8 +677,10 @@ def main():
                     overwrite=OVERWRITE_NULL,
                 )
                 print(f"  {fish[1]:50s}  {r['status']}  thr=±{r['thresh']:.4f}")
-            except Exception as e:
-                print(f"  {fish[1]:50s}  ERROR: {e}")
+                guard.ok()
+            except Exception as e:   # recorded and re-reported in the final summary
+                guard.fail(f"null: {fish[1]}", f"{type(e).__name__}: {e}",
+                           traceback.format_exc())
 
     # ── Ctrl-pooled IAAFT threshold ───────────────────────────
     # Computed here so it's available for both responder idx and figures.
@@ -645,7 +691,9 @@ def main():
             ctrl_fish, dir_analysis, null_percentile=RESPONDER_NULL_THRESH
         )
     except RuntimeError as e:
-        print(f"  ❌ {e} — skipping responder indices and IAAFT figures.")
+        guard.fail("ctrl-pooled IAAFT threshold",
+                   f"{e} — responder indices and IAAFT figures are skipped. "
+                   f"Run with --stages null (ctrl fish) first.")
         pooled_thr = None
 
     # ── Responder indices (all fish, ctrl-pooled threshold) ───
@@ -656,24 +704,27 @@ def main():
     if RUN_RESPONDERS and pooled_thr is not None:
         print("\n── d′ responder indices (all fish, ctrl-pooled thr) ─")
 
+        @guarded
         def _responders(fish):
-            try:
-                return save_dprime_responder_idx(
-                    fish=fish,
-                    dir_analysis=dir_analysis,
-                    amplitude_mode=AMPLITUDE_MODE,
-                    null_percentile=RESPONDER_NULL_THRESH,
-                    external_thr=pooled_thr,
-                    overwrite=OVERWRITE_RESPONDERS,
-                )
-            except Exception as e:
-                return {"fish": fish, "status": f"ERROR: {e}"}
+            return save_dprime_responder_idx(
+                fish=fish,
+                dir_analysis=dir_analysis,
+                amplitude_mode=AMPLITUDE_MODE,
+                null_percentile=RESPONDER_NULL_THRESH,
+                external_thr=pooled_thr,
+                overwrite=OVERWRITE_RESPONDERS,
+            )
 
         resp_results = Parallel(n_jobs=N_JOBS, backend="loky")(
             delayed(_responders)(fish) for fish in tqdm(all_fish, desc="d′ responders")
         )
         for r in resp_results:
             print(f"  {r['fish'][1]:50s}  {r['status']}")
+        guard.record_results("d′ responders", resp_results)
+
+    if not RUN_FIGURES:
+        guard.finish()
+        return
 
     # ── Load d′ arrays ───────────────────────────────────────
     print("\n── Loading d′ arrays for figures ────────")
@@ -683,16 +734,17 @@ def main():
         try:
             ctrl_dprime.append(_load_dprime(fish))
         except FileNotFoundError as e:
-            print(f"  ⚠️  {e}")
+            guard.fail(f"figures: {fish[1]}", str(e))
 
     for fish in expt_fish:
         try:
             expt_dprime.append(_load_dprime(fish))
         except FileNotFoundError as e:
-            print(f"  ⚠️  {e}")
+            guard.fail(f"figures: {fish[1]}", str(e))
 
     if not ctrl_dprime or not expt_dprime:
-        print("  ❌ Insufficient data for figures — aborting plot stage.")
+        guard.fail("figures", "no d′ arrays for ctrl and/or expt — figures not drawn")
+        guard.finish()
         return
 
     # ── Figure output dir ────────────────────────────────────
@@ -713,8 +765,8 @@ def main():
         # ── Fig 4: responder amplitude (ctrl-pooled IAAFT null) ──
         plot_iaaft_responder_amplitude(ctrl_fish, expt_fish, fig_dir, ptag, pooled_thr)
 
-    print("\nDone.")
+    guard.finish()
 
 
 if __name__ == "__main__":
-    main()
+    run_main(main)

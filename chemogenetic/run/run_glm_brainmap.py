@@ -62,15 +62,11 @@ RESPONDER_NULL_THRESH = cfg.RESPONDER_NULL_THRESH
 K_GLOBAL              = cfg.K_global
 input_tag             = cfg.input_tag
 
-# Match run_glm.py: detect HCRT regressor
-HCRT_BASE = "/resnick/home/ychiu/yun/lightsheet/hcrt-trpv1_hcrt-h2b-g8m_120min"
-HCRT_FISH_PATHS = [
-    f"{HCRT_BASE}/260426_hcrt-trpv1_hcrt-h2b-g8m_csn_10uM_fish{i}/hcrt_all.csv"
-    for i in [1, 2, 3]
-]
-if all(Path(p).exists() for p in HCRT_FISH_PATHS):
-    input_tag = "HCRT"
-    print(f"  HCRT regressor detected → input_tag={input_tag}")
+# The GLM is always run with the user-defined regressor (cfg.regressor_files); its output
+# folder is glm/inHCRT_K..., so the label must be "HCRT" (no CSV auto-detection any more).
+if input_tag != "HCRT":
+    sys.exit(f"\n❌ config input_tag is {input_tag!r}; it must be 'HCRT' "
+             f"(label of the user-defined regressor, names the glm/inHCRT_... folder).\n")
 
 DS          = (5, 5, 2)
 BRAIN_SHAPE = (288, 568, 40)

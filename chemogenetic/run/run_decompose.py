@@ -12,6 +12,10 @@ Pipeline per fish:
     Step 2: compute F_tonic (sliding percentile of F_corrected)
     Step 3: compute F_phasic (F_corrected - F_tonic) / F_tonic
 
+Failure handling: every fish is attempted; a failing fish is reported with its traceback,
+the other fish still run, and the job exits with code 1 (SLURM shows FAILED) at the end.
+Recording length is checked against the config (wash_end) for every fish.
+
 Usage
 -----
 On HPC (sbatch):
@@ -62,6 +66,8 @@ baseline_end        = cfg.baseline_end
 drug_start          = cfg.drug_start
 drug_end            = cfg.drug_end
 from utils.data_io import fish_dir, read_data
+from utils.run_guard import RunGuard, PipelineError, require_paths, run_main, setup_or_exit
+from chemogenetic.epochs import get_epochs
 from utils.preprocess import (
     compute_f_tonic,
     compute_f_phasic,
@@ -87,10 +93,12 @@ N_BG_VOLUMES = 100    # number of evenly-spaced volumes to sample
 BG_PATCH_SIZE = 10    # corner patch size in pixels (10x10)
 
 
+# Analysis epochs (config-driven): first EPOCH_DISCARD_MIN of each phase discarded.
+EPOCHS = setup_or_exit(get_epochs, cfg)
+
 # ============================================================
 # DECOMPOSITION QC
 # ============================================================
-BL_START_VOL = 1200   # vol 1200 = 20 min — skip habituation transient
 
 def _plot_decompose_qc(expt_ID, fish_out, tonic_path, phasic_path):
     """
@@ -102,7 +110,8 @@ def _plot_decompose_qc(expt_ID, fish_out, tonic_path, phasic_path):
                 (F_tonic left | F_phasic right, same 5 cells)
 
     Cell selection: subsample 20K cells, compute ΔZ = (μ_drug - μ_bl) / σ_bl,
-    pick top 5 by |ΔZ|. Z-score uses baseline vols BL_START_VOL:baseline_end.
+    pick top 5 by |ΔZ|. Baseline / drug windows = EPOCHS (first EPOCH_DISCARD_MIN of each
+    phase discarded).
     Loads from disk — never re-runs decomposition.
     """
     import matplotlib
@@ -118,10 +127,9 @@ def _plot_decompose_qc(expt_ID, fish_out, tonic_path, phasic_path):
     n_cells, T = Ft.shape
     t = np.arange(T) / (60 * sampling_rate_hz)       # minutes
 
-    bl_s = BL_START_VOL
-    bl_e = int(baseline_end)
-    dr_s = int(drug_start)
-    dr_e = int(drug_end)
+    bl_s, bl_e = EPOCHS.baseline
+    dr_s, dr_e = EPOCHS.drug
+    drug_on = int(drug_start)      # epoch lines mark the real drug onset / end
 
     # ── find top-5 tonic-ΔZ cells via subsample ───────────────────────
     rng  = np.random.default_rng(42)
@@ -156,8 +164,8 @@ def _plot_decompose_qc(expt_ID, fish_out, tonic_path, phasic_path):
 
     # ── epoch lines ───────────────────────────────────────────────────
     ep = {
-        "drug start": (dr_s / (60 * sampling_rate_hz), "tomato"),
-        "drug end":   (dr_e / (60 * sampling_rate_hz), "steelblue"),
+        "drug start": (drug_on / (60 * sampling_rate_hz), "tomato"),
+        "drug end":   (int(drug_end) / (60 * sampling_rate_hz), "steelblue"),
     }
 
     def _add_epochs(ax):
@@ -234,12 +242,14 @@ def _plot_decompose_qc(expt_ID, fish_out, tonic_path, phasic_path):
 # MAIN LOOP
 # ============================================================
 def main():
+    guard = RunGuard("decompose")
     print(f"Running decompose for {len(all_fish)} fish")
     print(f"  dir_voluseg  : {dir_voluseg}")
     print(f"  dir_analysis : {dir_analysis}")
     print(f"  window       : {f_tonic_window_size}s | percentile: {f_tonic_percentile}")
     print(f"  denom_mode   : {DENOM_MODE}")
     print(f"  n_jobs       : {N_JOBS}")
+    print(f"  epochs       : {EPOCHS.describe()}")
     print()
 
     for fish in all_fish:
@@ -253,7 +263,12 @@ def main():
         phasic_path  = fish_out / "f_phasic.npy"
         bg_path      = fish_out / "f_dark_scalar.npy"
 
-        try:
+        with guard.attempt(expt_ID):
+            require_paths(
+                [(fish_dir(dir_voluseg, fish) / "output" / "cells0_clean.hdf5", "run run_voluseg.py first"),
+                 (fish_dir(dir_voluseg, fish) / "output" / "volume0.hdf5",      "run run_voluseg.py first")],
+                f"{expt_ID}: voluseg output",
+            )
             # ----------------------------------------------------------
             # Step 0: estimate camera background F_dark
             # ----------------------------------------------------------
@@ -270,6 +285,9 @@ def main():
                 )
                 np.save(str(bg_path), np.array(f_dark, dtype=np.float32))
                 print(f"  ✅ F_dark = {f_dark:.2f} counts")
+                if not np.isfinite(f_dark) or f_dark <= 0:
+                    raise PipelineError(f"F_dark={f_dark} is not a positive number — "
+                                        f"check the corner patches / raw volume")
                 print(f"     top-left median:    {patch_medians['top_left']:.2f}")
                 print(f"     bottom-left median: {patch_medians['bottom_left']:.2f}")
 
@@ -281,6 +299,20 @@ def main():
             else:
                 data_array, _, _, _, _ = read_data(fish, dir_voluseg)
                 X = np.asarray(data_array, dtype=np.float32)
+                EPOCHS.check_recording(X.shape[1], f"{expt_ID} voluseg traces")
+                if X.shape[1] > EPOCHS.n_vols_required:
+                    guard.warn(expt_ID, f"{X.shape[1]} volumes recorded but config wash_end is "
+                                        f"{EPOCHS.n_vols_required}; extra volumes are kept but "
+                                        f"are outside every analysis window")
+
+                # how many samples does clip_min=0 truncate? (dim cells near F_dark)
+                frac_clipped = float(np.count_nonzero(X <= f_dark)) / X.size
+                print(f"  background clip: {100 * frac_clipped:.3f}% of samples <= F_dark "
+                      f"(set to 0)")
+                if frac_clipped > 0.05:
+                    guard.warn(expt_ID, f"{100 * frac_clipped:.1f}% of samples clipped at "
+                                        f"F_dark — dim cells are being truncated before the "
+                                        f"decomposition")
 
                 # subtract camera background before decomposition
                 X = subtract_background(X, f_dark, clip_min=0.0)
@@ -335,6 +367,13 @@ def main():
 
                 np.save(str(phasic_path), Fp)
                 print(f"  ✅ Saved F_phasic → {phasic_path}")
+                frac_nan = float(np.mean(~np.isfinite(Fp)))
+                print(f"  F_phasic non-finite fraction: {100 * frac_nan:.3f}% "
+                      f"(legacy denominator: NaN where F_tonic == 0)")
+                if frac_nan > 0.02:
+                    guard.warn(expt_ID, f"{100 * frac_nan:.1f}% of F_phasic is NaN/inf "
+                                        f"(F_tonic == 0 in many cells) — effect sizes for "
+                                        f"those cells will be NaN")
 
                 del X, Ft, Fp
                 gc.collect()
@@ -344,14 +383,10 @@ def main():
             # ----------------------------------------------------------
             _plot_decompose_qc(expt_ID, fish_out, tonic_path, phasic_path)
 
-        except Exception as e:
-            print(f"  ❌ {expt_ID} failed: {e}")
+        gc.collect()
 
-        finally:
-            gc.collect()
-
-    print("\nDecompose run complete.")
+    guard.finish()
 
 
 if __name__ == "__main__":
-    main()
+    run_main(main)

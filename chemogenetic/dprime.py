@@ -141,6 +141,10 @@ def summarize_fish_dprime(dprime_cells):
 
 def _get_window(start_full, end_full, sr_hz, offset_sec):
     """Apply a frame offset to a window (e.g. skip early baseline frames)."""
+    if offset_sec is None:
+        raise ValueError(
+            "offset_sec is required: pass cfg.EPOCH_DISCARD_MIN * 60 "
+            "(the stale 15-min default was removed so every script uses the config)")
     off = int(round(offset_sec * sr_hz))
     s   = int(start_full + off)
     e   = int(end_full)
@@ -157,7 +161,7 @@ def dprime_one_fish(
     drug_start,
     drug_end,
     sampling_rate_hz=1.0,
-    offset_sec=15 * 60,
+    offset_sec=None,
     amplitude_mode="raw",
     var_floor=1e-4,
     eps_var=1e-8,
@@ -168,7 +172,7 @@ def dprime_one_fish(
     Compute and save d′ per cell for one fish.
 
     The offset_sec parameter skips the first `offset_sec` of each window
-    (e.g. 15 min) to avoid edge artefacts from F_phasic decomposition.
+    (cfg.EPOCH_DISCARD_MIN) — the fish-settling / habituation period.
 
     Reads  : dir_analysis / proj_ID / expt_ID / data_array_f_phasic.npy
     Writes : dir_analysis / proj_ID / expt_ID /
@@ -185,7 +189,7 @@ def dprime_one_fish(
         Frame indices from config (before offset is applied).
     sampling_rate_hz : float
     offset_sec : float
-        Seconds to skip at the start of each window. Default 15 min.
+        Seconds to skip at the start of each window (cfg.EPOCH_DISCARD_MIN * 60). Required.
     amplitude_mode : str
         "raw", "abs", or "rms".
     overwrite : bool
@@ -296,14 +300,14 @@ def iaaft_null_dprime_one_fish(
     drug_start,
     drug_end,
     sampling_rate_hz=1.0,
-    offset_sec=15 * 60,
+    offset_sec=None,
     amplitude_mode="raw",
     var_floor=1e-4,
     eps_var=1e-8,
     n_surrogates=200,
     n_iter_iaaft=50,
     n_cells_null=20000,
-    null_percentile=95,
+    null_percentile=99,
     seed=0,
     overwrite=False,
 ):
@@ -408,7 +412,7 @@ def save_dprime_responder_idx(
     fish,
     dir_analysis,
     amplitude_mode="raw",
-    null_percentile=95,
+    null_percentile=99,
     external_thr=None,
     overwrite=True,
 ):
@@ -479,7 +483,7 @@ def save_dprime_responder_idx(
 # CTRL-POOLED IAAFT THRESHOLD
 # ============================================================
 
-def compute_ctrl_pooled_threshold(ctrl_fish_list, dir_analysis, null_percentile=95):
+def compute_ctrl_pooled_threshold(ctrl_fish_list, dir_analysis, null_percentile=99):
     """
     Pool surrogate d′ values across all ctrl fish null distributions and
     return the p{null_percentile} of |d′_null| as a single scalar threshold.
@@ -495,7 +499,7 @@ def compute_ctrl_pooled_threshold(ctrl_fish_list, dir_analysis, null_percentile=
     ----------
     ctrl_fish_list  : list of (proj_ID, expt_ID) tuples
     dir_analysis    : str or Path
-    null_percentile : int, default 95
+    null_percentile : int, default 99
 
     Returns
     -------

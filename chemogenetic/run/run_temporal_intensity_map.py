@@ -55,6 +55,9 @@ args, _ = parser.parse_known_args()
 cfg = importlib.import_module(f"chemogenetic.config.{args.config}")
 
 from utils.data_io import fish_dir
+from utils.run_guard import RunGuard, setup_or_exit
+from chemogenetic.epochs import get_epochs
+from chemogenetic.regressor import reference_traces
 from chemogenetic.temporal_windows import (
     compute_epoch_dz,
     compute_epoch_dprime,
@@ -62,17 +65,23 @@ from chemogenetic.temporal_windows import (
     load_fphasic,
     save_epoch_dz,
     save_epoch_dprime,
+    save_epoch_meta,
+    epoch_cache_is_current,
     load_epoch_dz,
     load_epoch_dprime,
     N_WINDOWS,
     WINDOW_LABELS,
-    TEMPORAL_WINDOWS,
 )
 from chemogenetic.brainmap import (
     _coarse_shape,
     _voxelize_cell_values,
     plot_group_comparison,
 )
+
+# ── epochs (config-driven) + failure tracking ─────────────────────────────
+EPOCHS = setup_or_exit(get_epochs, cfg)   # baseline = first EPOCH_DISCARD_MIN of the phase skipped
+GUARD  = RunGuard("temporal_intensity_map")
+print(f"epochs: {EPOCHS.describe()}")
 
 # ── directories + fish lists ──────────────────────────────────────────────
 dir_analysis  = cfg.dir_analysis
@@ -101,84 +110,53 @@ BRAIN_SHAPE = (288, 568, 40)   # confirmed from template_mean_brain.nii.gz
 
 RECOMPUTE_EPOCHS = False   # True → recompute even if epoch arrays exist
 
-# ── HCRT reference traces — lifted from hcrt_regressor.ipynb ─────────────
-# Source: raw mean HCRT fluorescence from hcrt_all.csv per fish
-# Pipeline: F_tonic  = rolling 20th-percentile (600 vols, centered)
-#            F_phasic = (F - F_tonic) / F_tonic
-#            Both z-scored on baseline (vols 0:CSN_ONSET_VOL)
+# ── Regressor reference traces (reference row drawn next to the cell maps) ─
+# Source: the raw traces named in cfg.regressor_files. Pipeline per file:
+#   F_tonic = rolling percentile (cfg.regressor_tonic_window / _quantile, centered)
+#   F_phasic = (F - F_tonic) / F_tonic
+#   both z-scored on the SAME baseline window as the cells (EPOCHS.baseline, ddof=0),
+#   so the window values are directly comparable with the cells' ΔZ / d'.
+# Optional here: an empty cfg.regressor_files skips the reference row (a listed file
+# that cannot be read stops the run — there is no silent fallback).
 
 import pandas as pd
 
-HCRT_BASE = "/resnick/home/ychiu/yun/lightsheet/hcrt-trpv1_hcrt-h2b-g8m_120min"
-HCRT_FISH_PATHS = [
-    f"{HCRT_BASE}/260426_hcrt-trpv1_hcrt-h2b-g8m_csn_10uM_fish1/hcrt_all.csv",
-    f"{HCRT_BASE}/260426_hcrt-trpv1_hcrt-h2b-g8m_csn_10uM_fish2/hcrt_all.csv",
-    f"{HCRT_BASE}/260426_hcrt-trpv1_hcrt-h2b-g8m_csn_10uM_fish3/hcrt_all.csv",
-]
-HCRT_FISH_LABELS   = ["fish1", "fish2", "fish3"]
-HCRT_TONIC_WINDOW  = 600    # vols (~10 min), matches voluseg convention
-HCRT_TONIC_PCTILE  = 0.20
-CSN_ONSET_VOL      = 2700
-TOTAL_VOLS_HCRT    = 7200
+hcrt_df           = None
+hcrt_window_dz    = None
+hcrt_window_dp    = None
+HCRT_FISH_LABELS  = []
 
-hcrt_df        = None
-hcrt_window_dz = None
-hcrt_window_dp = None
-
-if all(Path(p).exists() for p in HCRT_FISH_PATHS):
-    fish_tonic  = {}
-    fish_phasic = {}
-
-    for label, path in zip(HCRT_FISH_LABELS, HCRT_FISH_PATHS):
-        raw = pd.read_csv(path)["Mean"].values   # raw HCRT mean fluorescence
-
-        # F_tonic: rolling 20th-percentile, centered — matches notebook exactly
-        f_tonic = (pd.Series(raw)
-                     .rolling(HCRT_TONIC_WINDOW, center=True, min_periods=1)
-                     .quantile(HCRT_TONIC_PCTILE)
-                     .values)
-
-        # F_phasic: (F - F_tonic) / F_tonic
-        f_phasic = (raw - f_tonic) / np.maximum(f_tonic, 1e-6)
-
-        # z-score each on baseline (vols 0:CSN_ONSET_VOL)
-        for sig, store in [(f_tonic, fish_tonic), (f_phasic, fish_phasic)]:
-            mu    = sig[:CSN_ONSET_VOL].mean()
-            sigma = sig[:CSN_ONSET_VOL].std(ddof=1)
-            store[label] = (sig - mu) / max(sigma, 1e-6)
-
-        print(f"  {label}: tonic bl z={fish_tonic[label][:CSN_ONSET_VOL].mean():.4f}  "
-              f"phasic bl z={fish_phasic[label][:CSN_ONSET_VOL].mean():.4f}")
-
-    t_min      = np.arange(TOTAL_VOLS_HCRT) / 60.0
-    tonic_mat  = np.stack([fish_tonic[l]  for l in HCRT_FISH_LABELS])  # (3, T)
-    phasic_mat = np.stack([fish_phasic[l] for l in HCRT_FISH_LABELS])  # (3, T)
-    n_hcrt     = tonic_mat.shape[0]
+if getattr(cfg, "regressor_files", None):
+    _, tonic_mat, phasic_mat = setup_or_exit(reference_traces, cfg, EPOCHS.baseline, 0)
+    n_hcrt            = tonic_mat.shape[0]
+    HCRT_FISH_LABELS  = [f"fish{i + 1}" for i in range(n_hcrt)]
+    t_min             = np.arange(tonic_mat.shape[1]) / (60.0 * cfg.sampling_rate_hz)
+    _sem = (lambda m: m.std(axis=0, ddof=1) / np.sqrt(n_hcrt)) if n_hcrt > 1 \
+        else (lambda m: np.zeros(m.shape[1]))
 
     hcrt_df = pd.DataFrame({
         "time_min":        t_min,
-        "hcrt_tonic_z":   tonic_mat.mean(axis=0),
-        "hcrt_tonic_sem":  tonic_mat.std(axis=0, ddof=1) / np.sqrt(n_hcrt),
-        "hcrt_phasic_z":  phasic_mat.mean(axis=0),
-        "hcrt_phasic_sem": phasic_mat.std(axis=0, ddof=1) / np.sqrt(n_hcrt),
+        "hcrt_tonic_z":    tonic_mat.mean(axis=0),
+        "hcrt_tonic_sem":  _sem(tonic_mat),
+        "hcrt_phasic_z":   phasic_mat.mean(axis=0),
+        "hcrt_phasic_sem": _sem(phasic_mat),
     })
-    for label in HCRT_FISH_LABELS:
-        hcrt_df[f"tonic_{label}"]  = fish_tonic[label]
-        hcrt_df[f"phasic_{label}"] = fish_phasic[label]
+    for i, label in enumerate(HCRT_FISH_LABELS):
+        hcrt_df[f"tonic_{label}"]  = tonic_mat[i]
+        hcrt_df[f"phasic_{label}"] = phasic_mat[i]
 
     # per-window mean z during window (already baseline-normalised via z-score)
     hcrt_window_dz = [float(hcrt_df["hcrt_tonic_z"].values[s:e].mean())
-                      for _, s, e in TEMPORAL_WINDOWS]
+                      for _, s, e in EPOCHS.windows]
     hcrt_window_dp = [float(hcrt_df["hcrt_phasic_z"].values[s:e].mean())
-                      for _, s, e in TEMPORAL_WINDOWS]
+                      for _, s, e in EPOCHS.windows]
 
-    print(f"HCRT tonic  ΔZ per window: {[f'{v:.2f}' for v in hcrt_window_dz]}")
-    print(f"HCRT phasic d' per window: {[f'{v:.2f}' for v in hcrt_window_dp]}")
+    print(f"Reference tonic  ΔZ per window: {[f'{v:.2f}' for v in hcrt_window_dz]}")
+    print(f"Reference phasic d' per window: {[f'{v:.2f}' for v in hcrt_window_dp]}")
 else:
-    print("⚠️  One or more hcrt_all.csv not found — HCRT row will be skipped")
-    print(f"    Expected base: {HCRT_BASE}")
+    print("ℹ️  cfg.regressor_files is empty — reference row will be skipped")
 
-HCRT_WINDOW_VOLS = [(s, e) for _, s, e in TEMPORAL_WINDOWS]
+HCRT_WINDOW_VOLS = [(s, e) for _, s, e in EPOCHS.windows]
 
 
 # %% ── Cell 1: compute epoch ΔZ + d' for all fish ─────────────────────────
@@ -197,23 +175,25 @@ for group_tag, fish_list in all_groups.items():
         f_dir = fish_dir(dir_analysis, fish)
         f_dir.mkdir(parents=True, exist_ok=True)
 
-        dz_path = f_dir / "epoch_dz.npy"
-        dp_path = f_dir / "epoch_dprime.npy"
-
-        if dz_path.exists() and dp_path.exists() and not RECOMPUTE_EPOCHS:
-            print(f"  ⏩ {expt_id}: epoch arrays cached")
+        if epoch_cache_is_current(EPOCHS, f_dir) and not RECOMPUTE_EPOCHS:
+            print(f"  ⏩ {expt_id}: epoch arrays cached (same epochs)")
             continue
+        if (f_dir / "epoch_dz.npy").exists() and not RECOMPUTE_EPOCHS:
+            print(f"  ♻️  {expt_id}: cached epoch arrays have no matching epoch_meta.json "
+                  f"— recomputing so they are tied to the current epochs")
 
         print(f"  {expt_id}: computing epochs...")
-        f_tonic  = load_ftonic(f_dir)
-        f_phasic = load_fphasic(f_dir)
+        with GUARD.attempt(expt_id):
+            f_tonic  = load_ftonic(f_dir)
+            f_phasic = load_fphasic(f_dir)
 
-        dz, _, _ = compute_epoch_dz(f_tonic)
-        dprime   = compute_epoch_dprime(f_phasic)
+            dz, _, _ = compute_epoch_dz(f_tonic, EPOCHS)
+            dprime   = compute_epoch_dprime(f_phasic, EPOCHS)
 
-        save_epoch_dz(dz, f_dir)
-        save_epoch_dprime(dprime, f_dir)
-        del f_tonic, f_phasic, dz, dprime
+            save_epoch_dz(dz, f_dir)
+            save_epoch_dprime(dprime, f_dir)
+            save_epoch_meta(EPOCHS, f_dir)
+            del f_tonic, f_phasic, dz, dprime
         gc.collect()
 
 print("\nCell 1 complete.")
@@ -276,6 +256,12 @@ def _run_group(fish_list, metric: str, group_tag: str) -> list:
         delayed(_process_one_fish)(fish, metric)
         for fish in tqdm(fish_list, desc=f"{group_tag} {metric}")
     )
+
+    for fish, res in zip(fish_list, results):
+        if all(v is None for v in res):
+            GUARD.fail(f"{metric}/{group_tag}: {fish[1]}",
+                       "no voxelized data (missing medoids_template_vox.npy / epoch array, or "
+                       "cell-count mismatch — see the ⚠️ line above); fish left out of the map")
 
     avg_maps = []
     for w in range(N_WINDOWS):
@@ -371,3 +357,4 @@ plot_group_comparison(
 )
 
 print(f"\nAll figures saved → {COMPARISON_FIG_DIR}")
+GUARD.finish()

@@ -67,6 +67,7 @@ dir_analysis = cfg.dir_analysis
 dir_voluseg  = cfg.dir_voluseg
 
 from utils.data_io import fish_dir, read_data
+from utils.run_guard import RunGuard, require_paths, run_main
 from utils.preprocess import (
     compute_medoids,
     rotate_medoids,
@@ -224,6 +225,7 @@ def _plot_medoid_qc(
 # MAIN
 # ---------------------------------------------------------------------------
 def main():
+    guard = RunGuard("medoids")
     if not TEMPLATE_PATH.exists():
         raise FileNotFoundError(
             f"Template not found: {TEMPLATE_PATH}\n"
@@ -253,7 +255,7 @@ def main():
         rot_path  = fish_out / "medoids_rot_all.npy"
         vox_path  = fish_out / "medoids_template_vox.npy"
 
-        try:
+        with guard.attempt(expt_ID):
             # Step 1: load cell coordinates
             _, volume_mean_raw, cell_x, cell_y, cell_z = read_data(fish, dir_voluseg)
             vol_shape = volume_mean_raw.shape
@@ -323,15 +325,10 @@ def main():
                 reg_final_path = reg_final,
             )
 
-        except Exception as e:
-            print(f"  ❌ {expt_ID} failed: {e}")
-            raise
+        gc.collect()
 
-        finally:
-            gc.collect()
-
-    print("\nMedoid run complete.")
+    guard.finish()
 
 
 if __name__ == "__main__":
-    main()
+    run_main(main)

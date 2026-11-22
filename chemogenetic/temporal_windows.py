@@ -4,22 +4,15 @@ temporal_windows.py
 Compute per-cell metrics for each temporal window.
 
 Tonic ΔZ:
-    ΔZ_i(w) = (μ_drug_window_w - μ_baseline) / σ_baseline
+    ΔZ_i(w) = (μ_window_w - μ_baseline) / σ_baseline        on F_tonic
 
-Phasic d':
+Phasic d' (same formula on F_phasic; NOT a pooled-SD d′):
     d'_i(w) = (μ_phasic_window_w - μ_phasic_baseline) / σ_phasic_baseline
 
-Baseline: vols 1200–2699  (min 20–45; last 25 min of baseline epoch,
-          avoids the ~20 min habituation transient after fish mounting)
-
-Temporal windows (15-min / 900-vol wide, 10-min / 600-vol step):
-    W0   0–15 min  vols 2700–3600   drug
-    W1  10–25 min  vols 3300–4200   drug
-    W2  20–35 min  vols 3900–4800   drug
-    W3  30–45 min  vols 4500–5400   drug → washout transition
-    W4  40–55 min  vols 5100–6000   washout
-    W5  50–65 min  vols 5700–6600   washout
-    W6  60–75 min  vols 6300–7200   washout  (last vol = end of recording)
+Baseline and windows come from chemogenetic/epochs.py (config-driven):
+    baseline = [baseline_start + EPOCH_DISCARD_MIN, baseline_end)   (vols 1200-2700 for the 120-min CSN design)
+    windows  = seven 15-min windows, 10-min step, starting at drug onset:
+        W0 0-15, W1 10-25, W2 20-35, W3 30-45, W4 40-55, W5 50-65, W6 60-75 min
 
 I/O conventions (must match run_decompose.py):
     Input  reads from:  fish_dir(dir_analysis, fish) / "f_tonic.npy"
@@ -37,87 +30,52 @@ from pathlib import Path
 
 import numpy as np
 
+from chemogenetic.epochs import (   # noqa: F401  (re-exported for the run scripts)
+    Epochs,
+    N_WINDOWS,
+    WINDOW_LABELS,
+)
 
-# ── recording constants (1 vol / sec) ─────────────────────────────────────
-BASELINE_START: int = 1200   # inclusive  (20 min)
-BASELINE_END:   int = 2700   # exclusive  (45 min = csn_onset)
 
-# (label, start_vol_inclusive, end_vol_exclusive)
-TEMPORAL_WINDOWS: list[tuple[str, int, int]] = [
-    ("0–15 min",  2700, 3600),
-    ("10–25 min", 3300, 4200),
-    ("20–35 min", 3900, 4800),
-    ("30–45 min", 4500, 5400),
-    ("40–55 min", 5100, 6000),
-    ("50–65 min", 5700, 6600),
-    ("60–75 min", 6300, 7200),
-]
-N_WINDOWS:     int       = len(TEMPORAL_WINDOWS)
-WINDOW_LABELS: list[str] = [w[0] for w in TEMPORAL_WINDOWS]
+def _baseline_stats(arr: np.ndarray, epochs: Epochs):
+    b0, b1 = epochs.baseline
+    epochs.check_recording(arr.shape[1], "f_tonic/f_phasic")
+    seg = arr[:, b0:b1]
+    mu, sd = seg.mean(axis=1), seg.std(axis=1)
+    sd_safe = np.where(sd < 1e-6, 1e-6, sd)     # guard against silent / flat cells
+    return mu, sd, sd_safe
+
+
+def _windowed_effect(arr: np.ndarray, epochs: Epochs):
+    mu_bl, sd_bl, sd_safe = _baseline_stats(arr, epochs)
+    out = np.empty((arr.shape[0], epochs.n_windows), dtype=np.float32)
+    for w, (_, start, end) in enumerate(epochs.windows):
+        out[:, w] = (arr[:, start:end].mean(axis=1) - mu_bl) / sd_safe
+    return out, mu_bl, sd_bl
 
 
 # ── tonic ΔZ ──────────────────────────────────────────────────────────────
 
 def compute_epoch_dz(
-    f_tonic: np.ndarray,
+    f_tonic: np.ndarray, epochs: Epochs,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
-    Compute per-cell tonic ΔZ for each temporal window.
-
-    Parameters
-    ----------
-    f_tonic : np.ndarray, shape (n_cells, n_vols)
-        Tonic fluorescence traces (output of run_decompose → f_tonic.npy).
+    Per-cell tonic ΔZ for each temporal window.
 
     Returns
     -------
-    dz : np.ndarray, shape (n_cells, N_WINDOWS), dtype float32
-    mu_baseline : np.ndarray, shape (n_cells,)
-        Per-cell baseline mean (for QC).
-    sigma_baseline : np.ndarray, shape (n_cells,)
-        Per-cell baseline SD (for QC).
+    dz : (n_cells, n_windows) float32
+    mu_baseline, sigma_baseline : (n_cells,) float32   (for QC)
     """
-    baseline = f_tonic[:, BASELINE_START:BASELINE_END]
-    mu_bl    = baseline.mean(axis=1)
-    sigma_bl = baseline.std(axis=1)
-    # Guard against silent / flat cells
-    sigma_bl_safe = np.where(sigma_bl < 1e-6, 1e-6, sigma_bl)
-
-    dz = np.empty((f_tonic.shape[0], N_WINDOWS), dtype=np.float32)
-    for w, (_, start, end) in enumerate(TEMPORAL_WINDOWS):
-        mu_drug  = f_tonic[:, start:end].mean(axis=1)
-        dz[:, w] = (mu_drug - mu_bl) / sigma_bl_safe
-
-    return dz, mu_bl.astype(np.float32), sigma_bl.astype(np.float32)
+    dz, mu_bl, sd_bl = _windowed_effect(f_tonic, epochs)
+    return dz, mu_bl.astype(np.float32), sd_bl.astype(np.float32)
 
 
 # ── phasic d' per window ───────────────────────────────────────────────────
 
-def compute_epoch_dprime(f_phasic: np.ndarray) -> np.ndarray:
-    """
-    Compute per-cell phasic d' for each temporal window.
-
-    d'_i(w) = (μ_phasic_w - μ_phasic_baseline) / σ_phasic_baseline
-
-    Parameters
-    ----------
-    f_phasic : np.ndarray, shape (n_cells, n_vols)
-        Phasic fluorescence traces (output of run_decompose → f_phasic.npy).
-
-    Returns
-    -------
-    dprime : np.ndarray, shape (n_cells, N_WINDOWS), dtype float32
-    """
-    baseline_p  = f_phasic[:, BASELINE_START:BASELINE_END]
-    mu_bl_p     = baseline_p.mean(axis=1)
-    sigma_bl_p  = baseline_p.std(axis=1)
-    sigma_safe  = np.where(sigma_bl_p < 1e-6, 1e-6, sigma_bl_p)
-
-    dprime = np.empty((f_phasic.shape[0], N_WINDOWS), dtype=np.float32)
-    for w, (_, start, end) in enumerate(TEMPORAL_WINDOWS):
-        mu_w        = f_phasic[:, start:end].mean(axis=1)
-        dprime[:, w] = (mu_w - mu_bl_p) / sigma_safe
-
+def compute_epoch_dprime(f_phasic: np.ndarray, epochs: Epochs) -> np.ndarray:
+    """Per-cell phasic effect size for each temporal window, (n_cells, n_windows) float32."""
+    dprime, _, _ = _windowed_effect(f_phasic, epochs)
     return dprime.astype(np.float32)
 
 
@@ -145,7 +103,7 @@ def load_fphasic(fish_analysis_dir: Path) -> np.ndarray:
 
 
 def save_epoch_dz(dz: np.ndarray, fish_analysis_dir: Path) -> Path:
-    """Save dz (n_cells × N_WINDOWS) → epoch_dz.npy"""
+    """Save dz (n_cells × n_windows) → epoch_dz.npy"""
     out = Path(fish_analysis_dir) / "epoch_dz.npy"
     np.save(str(out), dz)
     print(f"  Saved epoch_dz:     {out}  shape={dz.shape}")
@@ -153,7 +111,7 @@ def save_epoch_dz(dz: np.ndarray, fish_analysis_dir: Path) -> Path:
 
 
 def save_epoch_dprime(dprime: np.ndarray, fish_analysis_dir: Path) -> Path:
-    """Save dprime (n_cells × N_WINDOWS) → epoch_dprime.npy"""
+    """Save dprime (n_cells × n_windows) → epoch_dprime.npy"""
     out = Path(fish_analysis_dir) / "epoch_dprime.npy"
     np.save(str(out), dprime)
     print(f"  Saved epoch_dprime: {out}  shape={dprime.shape}")
@@ -161,7 +119,7 @@ def save_epoch_dprime(dprime: np.ndarray, fish_analysis_dir: Path) -> Path:
 
 
 def load_epoch_dz(fish_analysis_dir: Path) -> np.ndarray:
-    """Load epoch_dz.npy, shape (n_cells, N_WINDOWS)."""
+    """Load epoch_dz.npy, shape (n_cells, n_windows)."""
     p = Path(fish_analysis_dir) / "epoch_dz.npy"
     if not p.exists():
         raise FileNotFoundError(f"epoch_dz.npy not found: {p}\n"
@@ -169,8 +127,40 @@ def load_epoch_dz(fish_analysis_dir: Path) -> np.ndarray:
     return np.load(str(p))
 
 
+# ── cache provenance: epoch arrays are only valid for the epochs that made them ──
+
+def epochs_meta(epochs: Epochs) -> dict:
+    return {
+        "baseline": [int(x) for x in epochs.baseline],
+        "windows": [[lab, int(s), int(e)] for lab, s, e in epochs.windows],
+        "discard_frames": int(epochs.discard_frames),
+    }
+
+
+def save_epoch_meta(epochs: Epochs, fish_analysis_dir: Path) -> Path:
+    import json
+    out = Path(fish_analysis_dir) / "epoch_meta.json"
+    out.write_text(json.dumps(epochs_meta(epochs), indent=2))
+    return out
+
+
+def epoch_cache_is_current(epochs: Epochs, fish_analysis_dir: Path) -> bool:
+    """True only if epoch_dz/epoch_dprime exist AND were made with exactly these epochs."""
+    import json
+    d = Path(fish_analysis_dir)
+    meta = d / "epoch_meta.json"
+    if not (d / "epoch_dz.npy").exists() or not (d / "epoch_dprime.npy").exists():
+        return False
+    if not meta.exists():
+        return False        # legacy arrays of unknown provenance -> recompute once
+    try:
+        return json.loads(meta.read_text()) == epochs_meta(epochs)
+    except Exception:       # noqa: BLE001 — unreadable sidecar == not current
+        return False
+
+
 def load_epoch_dprime(fish_analysis_dir: Path) -> np.ndarray:
-    """Load epoch_dprime.npy, shape (n_cells, N_WINDOWS)."""
+    """Load epoch_dprime.npy, shape (n_cells, n_windows)."""
     p = Path(fish_analysis_dir) / "epoch_dprime.npy"
     if not p.exists():
         raise FileNotFoundError(f"epoch_dprime.npy not found: {p}\n"

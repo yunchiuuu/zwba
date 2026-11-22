@@ -803,6 +803,17 @@ def iaaft_null_one_fish(fish, dir_analysis, sampling_rate_hz,
         print(f"⏩ {expt_ID}: IAAFT null exists, skipping.")
         return {"fish": fish, "status": f"skipped_null_{NULL_TAG}"}
 
+    if (not overwrite and not thresh_path.exists()
+            and all(p.exists() for p in [null_path, idx_path, meta_path])):
+        # The surrogate distribution is already on disk (computed for another percentile):
+        # read the requested percentile off it instead of re-running 200 surrogates.
+        thr = float(np.nanpercentile(np.load(str(null_path)).reshape(-1), int(null_percentile)))
+        np.save(str(thresh_path), np.array(thr, dtype=np.float32))
+        print(f"ℹ️  {expt_ID}: null distribution exists; derived p{int(null_percentile)} "
+              f"threshold {thr:.6g} from it (no surrogates re-run)")
+        return {"fish": fish, "status": f"derived_null_thresh_p{int(null_percentile)}",
+                "thresh": thr}
+
     Ft_path = base_dir / "f_tonic.npy"
     if not Ft_path.exists():
         raise FileNotFoundError(f"Missing F_tonic: {Ft_path}")
@@ -872,7 +883,9 @@ def iaaft_null_one_fish(fish, dir_analysis, sampling_rate_hz,
                    "n_cells_null_used": int(n_null), "null_percentile": int(null_percentile),
                    "seed": int(seed), "sampling_rate_hz": float(sampling_rate_hz),
                    "Tfit": int(Tfit), "fit_start": int(fit_start), "fit_end": int(fit_end),
-                   "drug_uM": float(drug_uM), "V_ml": float(V_ml), "Q_ml_min": float(Q_ml_min)},
+                   "drug_uM": None if drug_uM is None else float(drug_uM),
+                   "V_ml": None if V_ml is None else float(V_ml),
+                   "Q_ml_min": None if Q_ml_min is None else float(Q_ml_min)},
                   f, indent=2)
 
     print(f"✅ {expt_ID}: IAAFT null done | thr(p{null_percentile})={thr:.6f}")
@@ -896,7 +909,7 @@ def _window_frames(sr_hz, t0_min, t1_min, Tfit):
 def save_responder_idx(fish, dir_analysis, sampling_rate_hz,
                         K_global, drift_global, lam_global,
                         input_tag="C", lag_global=0,
-                        null_tag="iaaft", null_percentile=95,
+                        null_tag="iaaft", null_percentile=99,
                         baseline_win_min=(0.0, 15.0),
                         drug_win_min=(30.0, 45.0),
                         yhat_sign_eps=0.0, chunk_cells=20000,
@@ -931,9 +944,22 @@ def save_responder_idx(fish, dir_analysis, sampling_rate_hz,
     _, _, thresh_path, _ = _null_output_paths(run_dir, null_tag, null_percentile)
 
     if not dR2_path.exists():
-        raise FileNotFoundError(f"Missing ΔR²: {dR2_path}")
+        raise FileNotFoundError(
+            f"Missing ΔR² for {expt_ID}: {dR2_path}\n"
+            f"  Run the GLM fit stages first: run_glm.py --stages refit,ablation")
     if not thresh_path.exists():
-        raise FileNotFoundError(f"Missing null threshold: {thresh_path}")
+        # The null distribution is saved once; any percentile can be read off it without
+        # re-running the surrogates (same computation as iaaft_null_one_fish).
+        null_dist_path = _null_output_paths(run_dir, null_tag, null_percentile)[0]
+        if not null_dist_path.exists():
+            raise FileNotFoundError(
+                f"Missing null for {expt_ID}: neither {thresh_path.name} nor "
+                f"{null_dist_path.name} exists in {run_dir}\n"
+                f"  Run: run_glm.py --stages null")
+        thr_derived = float(np.nanpercentile(np.load(str(null_dist_path)).reshape(-1), ptag))
+        np.save(str(thresh_path), np.array(thr_derived, dtype=np.float32))
+        print(f"ℹ️  {expt_ID}: derived p{ptag} threshold {thr_derived:.6g} from the saved "
+              f"null distribution ({null_dist_path.name}); saved {thresh_path.name}")
 
     dR2_real = np.load(str(dR2_path)).astype(np.float32).ravel()
     thr      = float(np.load(str(thresh_path)))

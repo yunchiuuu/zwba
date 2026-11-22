@@ -15,6 +15,8 @@ Location:
     ~/zwba/chemogenetic/config/config_ynt185_120min.py
 """
 
+import os
+
 # ============================================================
 # BASE PATHS
 # ============================================================
@@ -22,7 +24,7 @@ dir_voluseg      = "/resnick/groups/Proberlab/yun/lightsheet/"
 dir_registration = "/resnick/groups/Proberlab/yun/lightsheet/analysis_output/registration/"
 dir_analysis     = "/resnick/groups/Proberlab/yun/lightsheet/analysis_output/chemogenetic/"
 
-PYTHON_BIN = "/resnick/home/ychiu/miniconda3/envs/voluseg/bin/python"
+PYTHON_BIN = os.path.expanduser("~/miniconda3/envs/voluseg/bin/python")   # <- your conda env
 
 # ============================================================
 # PROJECT FOLDER
@@ -94,6 +96,20 @@ wash_end   = 120 * 60 * volume_per_sec
 
 
 # ============================================================
+# ANALYSIS EPOCHS  — one rule for every effect-size summary (ΔZ, d′, figures, responder sign)
+# ============================================================
+# Discard the first EPOCH_DISCARD_MIN of each phase (fish settling / habituation):
+#   baseline summary window = [baseline_start + discard, baseline_end)
+#   drug     summary window = [drug_start     + discard, drug_end)
+# The seven 15-min temporal windows (epoch_dz / epoch_dprime maps) start at drug onset and
+# are compared with the same baseline window. Defined in chemogenetic/epochs.py.
+# The GLM fit window follows the same rule: INCLUDED_BASELINE (below) is the baseline minutes before
+# drug onset that enter the fit, so the fit starts where the baseline summary window starts
+# (45 - EPOCH_DISCARD_MIN = 25 for this design). The fit runs to the end of the recording.
+EPOCH_DISCARD_MIN = 20
+
+
+# ============================================================
 # DECOMPOSITION
 # ============================================================
 df_f_percentile     = 20
@@ -112,22 +128,43 @@ BH_Q = 0.05
 # ============================================================
 # TONIC GLM
 # ============================================================
-input_tag    = "C"                     # "C" or "dC"
+input_tag    = "HCRT"                  # label of the user-defined regressor (names glm/inHCRT_K...). Keep "HCRT".
 K_global     = 600                     # kernel length (frames)
 drift_global = 1                       # polynomial drift order
 lam_global   = 0.5                     # ridge penalty
 lag_global   = 0                       # causal lag (frames)
 
-INCLUDED_BASELINE = 45.0               # minutes of baseline in GLM window
+INCLUDED_BASELINE = 25.0   # minutes of baseline before drug onset in the GLM fit (= baseline length - EPOCH_DISCARD_MIN)
 CLIP_ABS_DZ       = 50.0               # |ΔZ| clipping threshold
 NULL_TAG          = "iaaft"            # "iaaft" or "shift"
 RESPONDER_NULL_THRESH = 99             # null percentile for responder cutoff
+PHASIC_RESPONDER_NULL_THRESH = 99          # IAAFT null percentile for the phasic d' responder validation
 L_MIN = 10.0                           # plateau duration (minutes) for plateau-ΔZ
 
 # Derived: subfolder name for all GLM outputs (defined once, used everywhere)
 param_folder_name = (
     f"in{input_tag}_K{K_global}_drift{drift_global}_lam{lam_global}_lag{lag_global}"
 )
+
+
+# ============================================================
+# TONIC GLM REGRESSOR  — defined by YOU; REQUIRED (there is no fallback)
+# ============================================================
+# The GLM kernel is fit to this trace. run_glm.py stops with an error if it cannot be
+# read. One CSV per reference recording; `regressor_column` is the raw trace (one value
+# per volume, at least wash_end volumes). With "tonic_zscore" each trace becomes F_tonic
+# (centered rolling percentile), is z-scored on [0, drug_start) and averaged across files
+# (as in hcrt_regressor.ipynb); "none" uses the column as it is (e.g. a measured trace).
+# input_tag (above) is only the label that names the GLM output folder (inHCRT_K600_...).
+_HCRT_REF_DIR = "/resnick/home/ychiu/yun/lightsheet/hcrt-trpv1_hcrt-h2b-g8m_120min"
+regressor_files = [
+    f"{_HCRT_REF_DIR}/260426_hcrt-trpv1_hcrt-h2b-g8m_csn_10uM_fish{i}/hcrt_all.csv"
+    for i in (1, 2, 3)
+]
+regressor_column         = "Mean"
+regressor_preprocess     = "tonic_zscore"   # or "none"
+regressor_tonic_window   = 600              # volumes
+regressor_tonic_quantile = 0.20
 
 
 # ============================================================

@@ -90,9 +90,12 @@ args, _ = parser.parse_known_args()
 cfg = importlib.import_module(f"chemogenetic.config.{args.config}")
 
 from utils.data_io import fish_dir
+from utils.run_guard import RunGuard, setup_or_exit
+from chemogenetic.epochs import get_epochs
 from chemogenetic.temporal_windows import (
-    TEMPORAL_WINDOWS,
     N_WINDOWS,
+    save_epoch_meta,
+    epoch_cache_is_current,
     load_epoch_dz,
     load_epoch_dprime,
     compute_epoch_dz,
@@ -106,6 +109,9 @@ from chemogenetic.brainmap import _voxelize_cell_values
 
 # %% ── experiment config + shared constants ───────────────────────────────
 
+EPOCHS = setup_or_exit(get_epochs, cfg)   # baseline = first EPOCH_DISCARD_MIN of the phase skipped
+GUARD  = RunGuard("survey_by_regions")
+
 dir_analysis = cfg.dir_analysis
 EXPT_FISH    = cfg.expt_fish
 CTRL_FISH    = cfg.ctrl_fish
@@ -114,10 +120,11 @@ CTRL_TAG     = cfg.CTRL_TAG
 CLIP_ABS_DZ  = cfg.CLIP_ABS_DZ
 
 # MapZebrain masks registered into template space by register_mapzebrain_to_template.py
-MASKS_DIR = Path(
-    "/home/ychiu/yun/lightsheet/analysis_output/registration/"
-    "300um_template/mapzebrain_in_template/"
-)
+MASKS_DIR = Path(cfg.dir_registration) / "300um_template" / "mapzebrain_in_template"
+if not MASKS_DIR.is_dir():
+    sys.exit(f"\n❌ MapZebrain masks not found: {MASKS_DIR}\n"
+             f"   Run registration/submit_mapzebrain_registration.sh first "
+             f"(one-time, writes the masks in template space).\n")
 
 OUT_DIR = (
     Path(dir_analysis) / "comparisons" / cfg.COMPARISON_TAG / "survey_by_regions"
@@ -131,8 +138,7 @@ DS          = (5, 5, 2)
 N_JOBS      = 25
 BRAIN_SHAPE = (288, 568, 40)   # full-res template (X, Y, Z)
 
-# Windows of interest
-# TEMPORAL_WINDOWS: [(label, start_vol, end_vol), ...] — 7 entries
+# Windows of interest (the seven windows come from chemogenetic/epochs.py)
 #   index 0 →  0-15 min
 #   index 1 → 10-25 min  ← TRANSITION
 #   index 2 → 20-35 min
@@ -177,18 +183,20 @@ for group_tag, fish_list in all_groups.items():
     for fish in fish_list:
         f_dir = fish_dir(dir_analysis, fish)
         f_dir.mkdir(parents=True, exist_ok=True)
-        if (f_dir / "epoch_dz.npy").exists() and (f_dir / "epoch_dprime.npy").exists():
+        if epoch_cache_is_current(EPOCHS, f_dir):
             continue
         print(f"  Computing epochs for {fish[1]}...")
-        f_tonic  = load_ftonic(f_dir)
-        f_phasic = load_fphasic(f_dir)
-        dz, _, _ = compute_epoch_dz(f_tonic)
-        dprime   = compute_epoch_dprime(f_phasic)
-        save_epoch_dz(dz, f_dir)
-        save_epoch_dprime(dprime, f_dir)
-        del f_tonic, f_phasic, dz, dprime
+        with GUARD.attempt(fish[1]):
+            f_tonic  = load_ftonic(f_dir)
+            f_phasic = load_fphasic(f_dir)
+            dz, _, _ = compute_epoch_dz(f_tonic, EPOCHS)
+            dprime   = compute_epoch_dprime(f_phasic, EPOCHS)
+            save_epoch_dz(dz, f_dir)
+            save_epoch_dprime(dprime, f_dir)
+            save_epoch_meta(EPOCHS, f_dir)
+            del f_tonic, f_phasic, dz, dprime
         gc.collect()
-print("  ✅ All epoch arrays present.")
+print("  Epoch arrays ensured (failures, if any, are listed in the final summary).")
 
 
 # %% ── Cell 2: voxelize per fish → group-mean volumes ─────────────────────
@@ -783,3 +791,4 @@ print(f"  Rankings    : 4 × _ranking.csv")
 print(f"  Quadrant    : figures/quadrant_{{transition,stable}}_top{TOP_N}_by_{{tonic,phasic}}.png  (4 files)")
 print(f"  Brain map   : figures/brainmap_4panel_top{TOP5}_regions.png")
 print("=" * 70)
+GUARD.finish()

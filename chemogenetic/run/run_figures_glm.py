@@ -37,7 +37,7 @@ sys.path.insert(0, str(REPO_ROOT))
 parser = argparse.ArgumentParser()
 parser.add_argument("--config", required=True,
                     help="Config module under chemogenetic/config/")
-args, _ = parser.parse_known_args()
+args = parser.parse_args()
 
 cfg = importlib.import_module(f"chemogenetic.config.{args.config}")
 
@@ -55,10 +55,12 @@ expt_fish             = cfg.expt_fish
 EXPT_TAG              = cfg.EXPT_TAG
 NULL_TAG              = cfg.NULL_TAG
 PLOT_META             = cfg.PLOT_META
-RESPONDER_NULL_THRESH = 95 #cfg.RESPONDER_NULL_THRESH
+RESPONDER_NULL_THRESH = cfg.RESPONDER_NULL_THRESH
 sampling_rate_hz      = cfg.sampling_rate_hz
 
 from utils.data_io import fish_dir
+from utils.run_guard import RunGuard, run_main, setup_or_exit
+from chemogenetic.epochs import get_epochs
 
 # ============================================================
 # STAGE TOGGLES
@@ -84,12 +86,12 @@ def minutes_to_frames(min_pair, sr_hz, Tfull):
     e = int(round(min_pair[1] * 60 * sr_hz))
     return int(np.clip(s, 0, Tfull)), int(np.clip(e, 0, Tfull))
 
-# Apply 20-min offset to each epoch (skip habituation transient), matching dprime offset_sec=20*60.
-OFFSET_MIN   = 20.0
-_bl_start, _bl_end = frames_to_min_pair(baseline_start, baseline_end, sampling_rate_hz)
-_dr_start, _dr_end = frames_to_min_pair(drug_start,     drug_end,     sampling_rate_hz)
-BASELINE_MIN = (_bl_start + OFFSET_MIN, _bl_end)
-DRUG_MIN     = (_dr_start + OFFSET_MIN, _dr_end)
+# Epochs from the config (first EPOCH_DISCARD_MIN of each phase discarded) — identical to
+# run_dprime.py and the GLM responder sign.
+EPOCHS = setup_or_exit(get_epochs, cfg)
+GUARD  = RunGuard("figures_glm")     # missing inputs are recorded and make the job exit 1
+BASELINE_MIN = frames_to_min_pair(*EPOCHS.baseline, sampling_rate_hz)
+DRUG_MIN     = frames_to_min_pair(*EPOCHS.drug,     sampling_rate_hz)
 
 ptag = int(RESPONDER_NULL_THRESH)
 FIG_DIR = comparison_fig_dir(dir_analysis, COMPARISON_TAG)
@@ -172,7 +174,7 @@ def _box_4group(data, labels, box_groups, ylabel, title, p_pos, p_neg, out_path)
 # STAGE A: RESPONDER vs NON-RESPONDER MEAN TRACES
 # ============================================================
 
-BL_START_VOL = 1200   # vol 20 min — skip habituation transient
+BL_START_VOL = EPOCHS.baseline[0]   # first EPOCH_DISCARD_MIN of the baseline is skipped
 
 def _plot_responder_mean_traces(fish, group_tag):
     """
@@ -273,11 +275,14 @@ def compute_group_fractions(fish_list, group_name):
     for fish in fish_list:
         pos_idx, neg_idx = _load_responder_idx(fish)
         if pos_idx is None:
-            print(f"  ⚠️  {fish[1]}: responder idx missing — skipping")
+            GUARD.fail(fish[1], f"tonic responder idx missing (tonic_pos/neg_glm_{NULL_TAG}_"
+                                f"nullp{ptag}_idxs.npy) — run run_glm.py --stages responders "
+                                f"for this config; fish left out of the figure")
             continue
         f_dir = fish_dir(dir_analysis, fish)
         ft_path = f_dir / "f_tonic.npy"
         if not ft_path.exists():
+            GUARD.fail(fish[1], f"f_tonic.npy missing: {ft_path}")
             continue
         n_cells = np.load(str(ft_path), mmap_mode="r").shape[0]
         pos_frac = pos_idx.size / n_cells
@@ -292,7 +297,7 @@ def compute_group_fractions(fish_list, group_name):
 
 def plot_responder_fraction(pos_ctrl, neg_ctrl, pos_expt, neg_expt):
     if any(len(x) == 0 for x in [pos_ctrl, neg_ctrl, pos_expt, neg_expt]):
-        print("⚠️  Not enough data for responder fraction plot — skipping")
+        GUARD.fail("responder fraction plot", "not enough data (a group has no fish) — not drawn")
         return
     p_pos = mannwhitneyu(pos_expt, pos_ctrl, alternative="greater").pvalue
     p_neg = mannwhitneyu(neg_expt, neg_ctrl, alternative="greater").pvalue
@@ -325,11 +330,14 @@ def compute_group_dz(fish_list, group_name):
     for fish in fish_list:
         pos_idx, neg_idx = _load_responder_idx(fish)
         if pos_idx is None:
-            print(f"  ⚠️  {fish[1]}: responder idx missing — skipping")
+            GUARD.fail(fish[1], f"tonic responder idx missing (tonic_pos/neg_glm_{NULL_TAG}_"
+                                f"nullp{ptag}_idxs.npy) — run run_glm.py --stages responders "
+                                f"for this config; fish left out of the figure")
             continue
         f_dir = fish_dir(dir_analysis, fish)
         ft_path = f_dir / "f_tonic.npy"
         if not ft_path.exists():
+            GUARD.fail(fish[1], f"f_tonic.npy missing: {ft_path}")
             continue
 
         Ft = np.load(str(ft_path), mmap_mode="r")
@@ -366,7 +374,7 @@ def compute_group_dz(fish_list, group_name):
 
 def plot_dz_amplitude(dz_pos_ctrl, dz_neg_ctrl, dz_pos_expt, dz_neg_expt):
     if any(len(x) == 0 for x in [dz_pos_ctrl, dz_neg_ctrl, dz_pos_expt, dz_neg_expt]):
-        print("⚠️  Not enough data for ΔZ amplitude plot — skipping")
+        GUARD.fail("ΔZ amplitude plot", "not enough data (a group has no fish) — not drawn")
         return
     p_pos = mannwhitneyu(dz_pos_expt, dz_pos_ctrl, alternative="greater").pvalue
     p_neg = mannwhitneyu(dz_neg_expt, dz_neg_ctrl, alternative="less").pvalue
@@ -395,6 +403,7 @@ def plot_dz_amplitude(dz_pos_ctrl, dz_neg_ctrl, dz_pos_expt, dz_neg_expt):
 # ============================================================
 def main():
     print(f"run_figures_glm | null={NULL_TAG} p{RESPONDER_NULL_THRESH} | fig_dir={FIG_DIR}")
+    print(f"  epochs: {EPOCHS.describe()}")
 
     if RUN_TRACES:
         print("\n── A: Responder vs non-responder mean traces ────────────")
@@ -415,8 +424,9 @@ def main():
         dzp_expt, dzn_expt = compute_group_dz(expt_fish, EXPT_TAG)
         plot_dz_amplitude(dzp_ctrl, dzn_ctrl, dzp_expt, dzn_expt)
 
-    print(f"\n✅ run_figures_glm complete. Figures in: {FIG_DIR}")
+    print(f"\nFigures in: {FIG_DIR}")
+    GUARD.finish()
 
 
 if __name__ == "__main__":
-    main()
+    run_main(main)

@@ -27,6 +27,7 @@ Location:
 """
 
 import multiprocessing
+import getpass
 import os
 import sys
 from pathlib import Path
@@ -42,7 +43,7 @@ try:
 except AttributeError:
     n_threads = str(multiprocessing.cpu_count() - 2)
 
-HPC_USERNAME = "yun"
+HPC_USERNAME = getpass.getuser()   # your HPC login (scratch is /resnick/scratch/<login>)
 os.environ["TMPDIR"] = f"/resnick/scratch/{HPC_USERNAME}/tmp_ants"
 os.environ["ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS"] = n_threads
 os.makedirs(os.environ["TMPDIR"], exist_ok=True)

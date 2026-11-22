@@ -37,7 +37,7 @@ import gc
 import os
 import time
 from pathlib import Path
-import log_step from data_io
+from utils.data_io import log_step
 
 # ============================================================
 # PARSE ARGUMENTS
