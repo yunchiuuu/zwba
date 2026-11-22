@@ -89,8 +89,17 @@ Imaging constants (`FRAMES_PER_VOLUME=40`, 250 µm, 1.52 µm/px) are set at the 
 ```bash
 bash registration/submit_registration_syn.sh --config config_registration
 ```
-One job per uncommented fish (32 CPUs; the script requests `MEM="24G"` — raise it in the
-script if jobs are OOM-killed). Per fish it writes `expt_to_mean_warp.nii.gz`,
+One job per fish in `all_fish` (32 CPUs; the script requests `MEM="24G"` — raise it in the
+script if jobs are OOM-killed). **Fish that already have a complete registration made with the current
+template are skipped**: the three output files exist and `registration_meta.json` records the same template
+sha256. Preview first with `--dry-run`, which lists every fish as SUBMIT or SKIP with the reason:
+```bash
+bash registration/submit_registration_syn.sh --config config_registration --dry-run
+bash registration/submit_registration_syn.sh --config config_registration --overwrite        # redo every fish
+bash registration/submit_registration_syn.sh --config config_registration --trust-existing   # also skip old fish with no meta file
+```
+A fish is re-registered when files are missing, when the template changed, or with `--overwrite`.
+Per fish it writes `expt_to_mean_warp.nii.gz`,
 `expt_to_mean_affine.mat`, a QC overlay PDF, and `registration_meta.json` (template sha256,
 SyN parameters, git commit).
 
@@ -284,7 +293,7 @@ The same files draw the reference row of the temporal maps (z-scored on the base
 | `recording has N volumes but epochs need M` | wrong fish in the list or wrong `wash_end`/timing in the config |
 | Job `FAILED` in `sacct` | exit code 1 = some fish failed (see the summary at the end of the log); exit code 2 = bad config/input |
 | Registration submit says `--config is required` | pass a module name: `--config config_registration` |
-| Registration submits 0 jobs | all fish are commented out in `config_registration.py` |
+| Registration submits 0 jobs | all fish are already registered with the current template (see `--dry-run`), or commented out in `config_registration.py` |
 | Registered fish look misaligned | check `registration_meta.json` template sha256 vs. the current template; check the affine z-scale in the QC overlay (values far from ~1.0 are suspect) |
 | `Existing GLM outputs were fit with a different window` | `INCLUDED_BASELINE` changed since those fits; rebuild as in Step 6 |
 | GLM results differ from an older run | the fit window, regressor or threshold changed — rerun with `--stages refit,ablation,null,responders --overwrite refit,ablation,null,responders` |

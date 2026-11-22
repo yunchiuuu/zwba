@@ -146,7 +146,7 @@ L_MIN = 10.0                           # plateau duration (minutes) for plateau-
 
 # Derived: subfolder name for all GLM outputs (defined once, used everywhere)
 param_folder_name = (
-    f"in{input_tag}_K{K_global}_drift{drift_global}_lam{lam_global}_lag{lag_global}"
+    f"in{input_tag}_K{K_global}_drift{drift_global}_lam{lam_global}_lag{lag_global}_fit25"
 )
 
 
