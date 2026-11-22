@@ -1,4 +1,5 @@
 #!/bin/bash
+TIME="${ZWBA_TIME:-8:00:00}"   # walltime; override per call: ZWBA_TIME=48:00:00 bash ...
 # submit_survey_by_regions.sh
 # ============================
 # Submits one sbatch job per config for the regional survey pipeline.
@@ -49,7 +50,8 @@ print(PYTHON_BIN)
         --cpus-per-task=25 \
         --mem=256G \
         --output="${LOG_DIR}/survey_by_regions_${CFG}.log" \
-        --wrap="$PYTHON $SCRIPT --config $CFG ${EXTRA[*]}"
+        --time="$TIME" \
+        --wrap="$PYTHON $SCRIPT --config $CFG ${EXTRA[*]}" || { echo "ERROR: sbatch failed (message above). Nothing was submitted."; exit 1; }
 
     echo "  Submitted: $CFG"
 done

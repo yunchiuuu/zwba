@@ -1,4 +1,5 @@
 #!/bin/bash
+TIME="${ZWBA_TIME:-6:00:00}"   # walltime; override per call: ZWBA_TIME=48:00:00 bash ...
 # submit_medoids.sh
 # =================
 # Submit medoid computation + transform job for one config.
@@ -42,7 +43,8 @@ sbatch \
     --cpus-per-task=8 \
     --mem=64G \
     --output="${LOG_DIR}/${CONFIG}.log" \
-    --wrap="$PYTHON chemogenetic/run/run_medoids.py --config $CONFIG"
+    --time="$TIME" \
+    --wrap="$PYTHON chemogenetic/run/run_medoids.py --config $CONFIG" || { echo "ERROR: sbatch failed (message above). Nothing was submitted."; exit 1; }
 
 echo "Submitted."
 echo "Monitor: squeue -u \$USER"

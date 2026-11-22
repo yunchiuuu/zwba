@@ -1,4 +1,5 @@
 #!/bin/bash
+TIME="${ZWBA_TIME:-6:00:00}"   # walltime; override per call: ZWBA_TIME=48:00:00 bash ...
 # submit_decompose.sh
 # ===================
 # Submit decompose job for one config (one comparison group).
@@ -42,7 +43,8 @@ sbatch \
     --cpus-per-task=32 \
     --mem=128G \
     --output="${LOG_DIR}/${CONFIG}.log" \
-    --wrap="$PYTHON chemogenetic/run/run_decompose.py --config $CONFIG"
+    --time="$TIME" \
+    --wrap="$PYTHON chemogenetic/run/run_decompose.py --config $CONFIG" || { echo "ERROR: sbatch failed (message above). Nothing was submitted."; exit 1; }
 
 echo "Submitted."
 echo "Monitor: squeue -u \$USER"

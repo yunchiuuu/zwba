@@ -1,4 +1,5 @@
 #!/bin/bash
+TIME="${ZWBA_TIME:-6:00:00}"   # walltime; override per call: ZWBA_TIME=48:00:00 bash ...
 # submit_registration_syn.sh
 # ==========================
 # Submit one sbatch job per fish for SyN registration to the shared template.
@@ -73,7 +74,8 @@ while IFS= read -r EXPT_ID; do
         --cpus-per-task=$CPUS \
         --mem=$MEM \
         --output="$LOG" \
-        --wrap="$PYTHON $SCRIPT --config $CONFIG --expt_ID $EXPT_ID"
+        --time="$TIME" \
+        --wrap="$PYTHON $SCRIPT --config $CONFIG --expt_ID $EXPT_ID" || { echo "ERROR: sbatch failed (message above). Nothing was submitted."; exit 1; }
 
     echo "  Submitted: $EXPT_ID"
 done <<< "$EXPT_IDS"

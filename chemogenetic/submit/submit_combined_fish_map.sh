@@ -1,4 +1,5 @@
 #!/bin/bash
+TIME="${ZWBA_TIME:-3:00:00}"   # walltime; override per call: ZWBA_TIME=48:00:00 bash ...
 # submit_combined_fish_map.sh
 # Usage (from repo root):
 #     bash chemogenetic/submit/submit_combined_fish_map.sh --config config_hcrt_trpv1_pooled_csn_120min
@@ -33,7 +34,8 @@ sbatch \
     --cpus-per-task=4 \
     --mem=32G \
     --output="${LOG_DIR}/${CONFIG}.log" \
-    --wrap="$PYTHON chemogenetic/run/run_combined_fish_map.py --config $CONFIG"
+    --time="$TIME" \
+    --wrap="$PYTHON chemogenetic/run/run_combined_fish_map.py --config $CONFIG" || { echo "ERROR: sbatch failed (message above). Nothing was submitted."; exit 1; }
 
 echo "Submitted."
 echo "Log: ${LOG_DIR}/${CONFIG}.log"

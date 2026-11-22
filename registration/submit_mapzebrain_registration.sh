@@ -1,4 +1,5 @@
 #!/bin/bash
+TIME="${ZWBA_TIME:-4:00:00}"   # walltime; override per call: ZWBA_TIME=48:00:00 bash ...
 # submit_mapzebrain_registration.sh
 # ==================================
 # Submit a single sbatch job to register the MapZebrain GCaMP reference brain
@@ -48,7 +49,8 @@ sbatch \
     --cpus-per-task=$CPUS \
     --mem=$MEM \
     --output="$LOG" \
-    --wrap="$PYTHON $SCRIPT $EXTRA_ARGS"
+    --time="$TIME" \
+    --wrap="$PYTHON $SCRIPT $EXTRA_ARGS" || { echo "ERROR: sbatch failed (message above). Nothing was submitted."; exit 1; }
 
 echo ""
 echo "Job submitted."

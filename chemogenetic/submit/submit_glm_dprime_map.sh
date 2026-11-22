@@ -39,7 +39,7 @@ sbatch \
     --mem=16G \
     --time=1:00:00 \
     --output="${LOG_DIR}/${CONFIG}.log" \
-    --wrap="$PYTHON $SCRIPT --config $CONFIG"
+    --wrap="$PYTHON $SCRIPT --config $CONFIG" || { echo "ERROR: sbatch failed (message above). Nothing was submitted."; exit 1; }
 
 echo "Submitted."
 echo "Monitor: squeue -u \$USER"
