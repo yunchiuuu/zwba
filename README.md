@@ -15,6 +15,67 @@ Written for the Prober lab Resnick HPC (SLURM). Everything below runs **from the
 
 ---
 
+## Quick start
+
+**Where am I?** Run this any time. It is read-only and takes seconds, and it prints a table of every fish × stage
+(✔ done, ✗ missing, · blocked by an earlier stage, ⚠ stale) plus the next command to run:
+
+```bash
+cd ~/zwba
+bash chemogenetic/submit/status.sh --config config_<exp>
+```
+
+**Run order** (details for each step are in section 2; `<exp>` = your config module name):
+
+|  | Stage | Command | Needs | Check before moving on |
+|---|---|---|---|---|
+| A | TIFF → HDF5 (analysis PC) | `tif_to_h5.py` (not in repo yet) | raw volumes | files `input/volume1000.h5…` complete |
+| B | voluseg (one fish per job) | `sbatch … run_voluseg.py --proj_ID P --expt_ID E` | A | `output/cells0_clean.hdf5`, `volume0.hdf5` exist |
+| C | registration to template | `bash registration/submit_registration_syn.sh --config config_registration` | B | **open every `qc_registration_overlay.pdf`** |
+| D | decompose (F_tonic / F_phasic) | `bash chemogenetic/submit/submit_decompose.sh --config config_<exp>` | B | **open every `decompose_QC.png`** |
+| E | medoids → template coordinates | `bash chemogenetic/submit/submit_medoids.sh --config config_<exp>` | C | status shows ✔ in `med` |
+| F | GLM + IAAFT null + tonic responders | `bash chemogenetic/submit/submit_glm.sh --config config_<exp>` | D | log ends `✅ complete … 0 failed` |
+| G | phasic d′ + IAAFT + group figures | `bash chemogenetic/submit/submit_dprime.sh --config config_<exp>` | D | log ends `✅ complete … 0 failed` |
+| H | GLM figures | `bash chemogenetic/submit/submit_figures_glm.sh --config config_<exp>` | F | responder fraction in controls is near the false-positive rate (≈ 1 − p/100) |
+| I | maps | `submit_temporal_intensity_map.sh`, `submit_glm_dprime_map.sh`, `submit_kernel_map.sh`, `submit_combined_fish_map.sh`, `submit_survey_by_regions.sh` | E, F, G | per-fish N shown on the maps |
+
+C and D are independent of each other and can run at the same time; F and G can too. (Section 2 groups these stages into differently numbered steps.)
+Registration (C), decompose (D), medoids (E), GLM (F) and d′ (G) skip fish whose outputs already exist; use `--overwrite`, `--stages` or the `OVERWRITE_*` constants to redo. Maps cache their epoch arrays and recompute them when the epochs change.
+A failed fish never stops the batch, but the job exits with code 1 and the end of the log lists every failure.
+
+### Reading the status table
+
+```bash
+bash chemogenetic/submit/status.sh --config config_<exp>               # all fish in the config
+bash chemogenetic/submit/status.sh --config config_<exp> --fish fish3   # only expt_IDs containing "fish3"
+bash chemogenetic/submit/status.sh --config config_<exp> --strict       # exit code 1 if anything is missing or stale
+```
+It only reads files (nothing is submitted or created) and takes a few seconds. One row per fish, one column per stage:
+
+| Column | Stage | Done when |
+|---|---|---|
+| `vol` | voluseg | `cells0_clean.hdf5` and `volume0.hdf5` exist |
+| `reg` | registration | warp, affine and registered image exist, and `registration_meta.json` records the current template |
+| `dec` | decompose | `f_dark_scalar.npy`, `f_tonic.npy`, `f_phasic.npy` |
+| `med` | medoids | `medoids_all.npy`, `medoids_rot_all.npy`, `medoids_template_vox.npy` |
+| `fit`, `null`, `resp` | GLM fit, IAAFT null, responder calls | files in `glm/<param_folder_name>/` and the `tonic_pos/neg_glm_…_nullp<N>_idxs.npy` files, with the p<N> from the config |
+| `dpr`, `dnul`, `dres` | d′, its null, responder calls | `phasic_dprime_cells_*.npy`, the null file, `phasic_pos/neg_dprime_…_idxs.npy` |
+| `map` | epoch maps | `epoch_dz.npy` and `epoch_dprime.npy`, made with the current epochs |
+
+| Symbol | Meaning |
+|---|---|
+| ✔ | done and current |
+| ✗ | missing, and everything before it is done: this is what to run next |
+| · | blocked: an earlier stage in that row is not done yet |
+| ⚠ | exists but stale or unverifiable; the "Details" list below the table says why |
+
+Below the table, **Next** lists the command for each stage that has ✗ or ⚠ and how many fish it affects, and **Details**
+explains each ⚠ (different template, GLM fit window changed, epoch cache made with other epochs). A stage with a ⚠ in
+`map` just needs the map script re-run; a ⚠ in `fit` means the GLM must be rebuilt (see Step 6).
+`Next` does not know about fish you are deliberately leaving out; for the GLM use `--exclude` (Step 6).
+
+---
+
 ## 0. Before you start
 
 **You need**
@@ -99,6 +160,24 @@ bash registration/submit_registration_syn.sh --config config_registration --over
 bash registration/submit_registration_syn.sh --config config_registration --trust-existing   # also skip old fish with no meta file
 ```
 A fish is re-registered when files are missing, when the template changed, or with `--overwrite`.
+
+**Registrations made before `registration_meta.json` existed** (old fish show ⚠ in `status.sh`) do not need to be
+redone if they used the current template. Verify and stamp them once:
+```bash
+# 1. when was the CURRENT template built? (mtime of the ORIGINAL file, e.g. zstack_template/template_mean_brain.nii.gz)
+ls -l --time-style=long-iso <original template file>
+# 2. dry run: shows the decision per fish and what it would write
+python3 registration/backfill_registration_meta.py --config config_registration --registered-after "2026-07-11 19:01"
+#    (the fish list is all_fish in config_registration; if you keep old fish commented out there, take it from
+#     the analysis config instead: add  --fish-config config_hcrt_trpv1_csn_120min)
+# 3. write the meta files
+python3 registration/backfill_registration_meta.py --config config_registration --registered-after "2026-07-11 19:01" --write   # same options as the dry run
+```
+A fish is stamped only if its warp was written at or after that time and its job log (if there is one) loaded a
+file with the same sha256 as the current template. Fish that fail either test are listed as BLOCKED and are left
+alone, so `submit_registration_syn.sh` will re-register them. Stamped files carry `"backfilled": true` and the
+evidence used. The check cannot prove the template identity, only make it very likely, so treat the stamp as a record
+of your inference.
 Per fish it writes `expt_to_mean_warp.nii.gz`,
 `expt_to_mean_affine.mat`, a QC overlay PDF, and `registration_meta.json` (template sha256,
 SyN parameters, git commit).
@@ -178,6 +257,7 @@ Every run script uses the shared guard in `utils/run_guard.py`:
   config key, every missing file). They print `❌ <message>` and exit with code **2**.
 - **Per-fish failures** are caught, printed with a traceback, and the batch continues. At the end of
   the log a summary lists every failed item, and the job exits with code **1** so `sacct` shows it as `FAILED`.
+- `bash chemogenetic/submit/status.sh --config config_<exp>` shows which fish still have missing or stale outputs.
 - A clean run ends with `✅ complete: N ok, 0 failed`. `grep -n "❌" logs/<stage>/<config>.log` shows all failures.
 
 ---

@@ -25,6 +25,8 @@ TIME="${ZWBA_TIME:-6:00:00}"   # walltime; override per call: ZWBA_TIME=48:00:00
 #     --trust-existing   also skip fish that have the three output files but no
 #                        registration_meta.json (made before provenance was recorded;
 #                        their template cannot be verified)
+# Old registrations can be verified once and stamped with a meta file:
+#     python3 registration/backfill_registration_meta.py --config config_registration --registered-after "YYYY-MM-DD HH:MM"
 
 SCRIPT="registration/run_registration_syn.py"
 CPUS=32
@@ -97,7 +99,7 @@ for proj_id, expt_id in cfg.all_fish:
         if trust:
             print(f"SKIP\t{expt_id}\tfiles present, no registration_meta.json (--trust-existing)")
         else:
-            print(f"SUBMIT\t{expt_id}\tfiles present but no registration_meta.json (template unverified; use --trust-existing to skip)")
+            print(f"SUBMIT\t{expt_id}\tfiles present but no registration_meta.json (template unverified; verify and stamp them with registration/backfill_registration_meta.py, or use --trust-existing)")
         continue
     try:
         old = json.load(open(mp))["template"]["sha256"]

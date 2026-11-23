@@ -39,13 +39,14 @@ EXPT_PROJ = "hcrt-trpv1_huc-h2b-g8m_csn_120min"
 # ============================================================
 ctrl_fish = [
     (CTRL_PROJ, "251021_huc-h2b-g8m_csn_10uM_fish1"),
-    (CTRL_PROJ, "251118_huc-h2b-g8m_csn_10uM_fish1"),
+    #(CTRL_PROJ, "251118_huc-h2b-g8m_csn_10uM_fish1"),
     (CTRL_PROJ, "251118_huc-h2b-g8m_csn_10uM_fish2"),
     (CTRL_PROJ, "251118_huc-h2b-g8m_csn_10uM_fish3"),
     (CTRL_PROJ, "251118_huc-h2b-g8m_csn_10uM_fish4"),
     (CTRL_PROJ, "251118_huc-h2b-g8m_csn_10uM_fish5"),
-    (CTRL_PROJ, "251126_huc-h2b-g8m_csn_10uM_fish1"),
-]   # N = 7 
+    #(CTRL_PROJ, "251126_huc-h2b-g8m_csn_10uM_fish1"),
+    (CTRL_PROJ, "260825_huc-h2b-g8m_csn_10uM_fish2")
+]   # N = 6
 
 expt_fish = [
     (EXPT_PROJ, "251008_hcrt-trpv1_huc-h2b-g8m_csn_10uM_fish4"),
@@ -57,7 +58,8 @@ expt_fish = [
     (EXPT_PROJ, "260514_hcrt-trpv1_huc-h2b-g8m_csn_10uM_fish1"),
     (EXPT_PROJ, "260514_hcrt-trpv1_huc-h2b-g8m_csn_10uM_fish2"),
     (EXPT_PROJ, "260515_hcrt-trpv1_huc-h2b-g8m_csn_10uM_fish1"),
-]   # N = 9
+    (EXPT_PROJ, "260824_hcrt-trpv1_huc-h2b-g8m_csn_10uM_fish1")
+]   # N = 10
 
 all_fish = ctrl_fish + expt_fish
 
