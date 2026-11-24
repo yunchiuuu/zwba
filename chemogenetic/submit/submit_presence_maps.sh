@@ -1,11 +1,11 @@
 #!/bin/bash
-# submit_glm_dprime_map.sh
+# submit_presence_maps.sh
 # ========================
 # Usage (from repo root):
-#     bash chemogenetic/submit/submit_glm_dprime_map.sh --config config_hcrt_trpv1_csn_120min
+#     bash chemogenetic/submit/submit_presence_maps.sh --config config_hcrt_trpv1_csn_120min
 
-SCRIPT="chemogenetic/run/run_glm_dprime_map.py"
-LOG_DIR="logs/brainmap"
+SCRIPT="chemogenetic/run/run_presence_maps.py"
+LOG_DIR="logs/presence_maps"
 
 CONFIG=""
 EXTRA=""
@@ -20,7 +20,7 @@ done
 
 if [ -z "$CONFIG" ]; then
     echo "ERROR: --config is required."
-    echo "Usage: bash chemogenetic/submit/submit_glm_dprime_map.sh --config config_hcrt_trpv1_csn_120min"
+    echo "Usage: bash chemogenetic/submit/submit_presence_maps.sh --config config_hcrt_trpv1_csn_120min"
     exit 1
 fi
 
@@ -36,7 +36,7 @@ print(PYTHON_BIN)
 mkdir -p "$LOG_DIR"
 
 sbatch \
-    --job-name="glm_dprime_map_${CONFIG}" \
+    --job-name="presence_maps_${CONFIG}" \
     --ntasks=1 \
     --cpus-per-task=2 \
     --mem=16G \

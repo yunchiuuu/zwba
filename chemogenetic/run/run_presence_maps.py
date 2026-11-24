@@ -1,7 +1,8 @@
 """
-run_glm_dprime_map.py
+run_presence_maps.py
 =====================
-N-fish presence brain maps for tonic and phasic d' responders.
+N-fish presence brain maps for the responder sets: tonic ΔZ (F1), tonic GLM (F2, optional) and phasic d′ (G).
+(Formerly run_glm_dprime_map.py.)
 
 Three maps, each with its own parameter-labelled file name (the two tonic methods never share a file):
     tonic_dz_presence_map_top{p}.png                    tonic ΔZ, top-p% of |max ΔZ|  (stage F1, run_tonic_dz.py)
@@ -29,13 +30,11 @@ Colorbars:
 
 Usage
 -----
-    python run_glm_dprime_map.py --config config_hcrt_trpv1_csn_120min
-    bash chemogenetic/submit/submit_glm_dprime_map.sh --config config_hcrt_trpv1_csn_120min
+    python run_presence_maps.py --config config_hcrt_trpv1_csn_120min
+    bash chemogenetic/submit/submit_presence_maps.sh --config config_hcrt_trpv1_csn_120min
 
 Location:
-    ~/Zebrafish-whole-brain-analysis/chemogenetic/run/run_glm_dprime_map.py
-
-PREREQUISITE: brainmap_presence_addition.py must be appended to chemogenetic/brainmap.py.
+    ~/zwba/chemogenetic/run/run_presence_maps.py
 """
 
 import argparse
