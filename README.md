@@ -44,7 +44,7 @@ bash chemogenetic/submit/status.sh --config config_<exp>
 | G2 | d′ null diagnostics | `bash chemogenetic/submit/submit_figures_dprime_null.sh --config config_<exp>` | G | real \|d′\| tail rises above the null in the expt fish and not in ctrl; **null SD spread** (p95/p5) is below ~3 |
 | H1 | tonic ΔZ figures | `bash chemogenetic/submit/submit_figures_tonic_dz.sh --config config_<exp>` | F1 | **argmax-window histogram** is not dominated by washout windows; σ-vs-\|ΔZ\| shows no flat-baseline cloud |
 | H2 (optional) | GLM figures | `bash chemogenetic/submit/submit_figures_glm.sh --config config_<exp>` | F2 | responder fraction in controls is near the false-positive rate (≈ 1 − p/100) |
-| I | maps (the kernel map needs F2) | `submit_temporal_intensity_map.sh`, `submit_glm_dprime_map.sh` (+ optional `submit_tonic_overlap.sh`), `submit_kernel_map.sh`, `submit_combined_fish_map.sh`, `submit_survey_by_regions.sh` | E, F1, G | per-fish N shown on the maps |
+| I | maps (the kernel map needs F2) | `submit_temporal_intensity_map.sh`, `submit_glm_dprime_map.sh` (+ optional `submit_tonic_overlap.sh`, `submit_temporal_zplanes.sh`), `submit_kernel_map.sh`, `submit_combined_fish_map.sh`, `submit_survey_by_regions.sh` | E, F1, G | per-fish N shown on the maps |
 
 **The three responder methods in one line each** (full notes, null definitions and pros/cons: Part 4):
 - **F1** tonic ΔZ: top 5 % of |max ΔZ| per baseline-σ stratum, **per fish, rank-based, no null**; the responder fraction is fixed by p and carries no information.
@@ -519,12 +519,20 @@ from the config: both are IAAFT null percentiles you can change (default 99); if
 ### Stage I — maps (all need `medoids_template_vox.npy`)
 ```bash
 bash chemogenetic/submit/submit_temporal_intensity_map.sh --config config_<exp>   # epoch_dz.npy, epoch_dprime.npy, per-window maps
+bash chemogenetic/submit/submit_temporal_zplanes.sh      --config config_<exp>   # optional: the same temporal maps for single z planes (PDF, one page per plane)
 bash chemogenetic/submit/submit_glm_dprime_map.sh        --config config_<exp>   # N-fish presence maps: ΔZ (F1), GLM (F2, if run), phasic d′ (G), one file each
 bash chemogenetic/submit/submit_tonic_overlap.sh         --config config_<exp>   # optional: per-fish overlap of the ΔZ and GLM sets (needs F1 and F2)
 bash chemogenetic/submit/submit_kernel_map.sh            --config config_<exp>   # kernel maps (needs F2)
 bash chemogenetic/submit/submit_combined_fish_map.sh     --config config_hcrt_trpv1_pooled_csn_120min
 bash chemogenetic/submit/submit_survey_by_regions.sh [--config config_<exp>] [--overwrite] [--top_n N]
 ```
+**Single z-plane temporal maps** (`run_temporal_zplanes.py`, optional). The temporal maps above average over all z in the XY panel (and over x in the YZ panel),
+so a signed effect with opposite sign in different planes cancels. This script draws the same figure (reference row, CTRL | EXPT | EXPT − CTRL, seven windows,
+same colour scale) for single z planes, one PDF page per plane, for tonic ΔZ and phasic d′: `temporal_{dz,dprime}_zplanes_DS…_slab{S}_z{bins}.pdf`; page 1 shows the number of cells per z bin and
+the chosen planes. Two steps: the group volumes are saved as `temporal_group_volumes_DS…_clip….npz`, then the pages are drawn from that file.
+Options: `--z-bins 3,6,9,12` (coarse-z bins; bin k = template planes 2k, 2k+1), `--n-planes N` (default 6, spread over the bins that hold cells), `--slab N` (average N neighbouring bins),
+`--plot-only` (choose other planes without recomputing). It needs the epoch arrays from `submit_temporal_intensity_map.sh` made with the current epochs and cell filter; fish with stale or missing caches are listed and left out.
+
 **Presence maps** (`run_glm_dprime_map.py`): one file per method, parameters in the name, never overwriting each other:
 
 | File | Method |
