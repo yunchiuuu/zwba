@@ -146,6 +146,9 @@ def plot_group_comparison(
     vmin:            float  = DEFAULT_VMIN,
     vmax:            float  = DEFAULT_VMAX,
     proj_mode:       str    = DEFAULT_PROJ,
+    # ── single z-plane view (None = projection over all z, the default) ───
+    z_slice:         int | None = None,    # first coarse-z bin of the slab shown in the XY panel
+    z_slab:          int    = 1,           # number of coarse-z bins averaged (slab thickness)
     # ── HCRT reference trace row ──────────────────────────────────────────
     hcrt_df                  = None,
     hcrt_trace_col:  str     = "hcrt_mean_z",
@@ -164,6 +167,10 @@ def plot_group_comparison(
         Row 0 (opt): HCRT F_tonic or F_phasic trace spanning all columns
         Row 1+: CTRL | EXPT | EXPT-CTRL brain maps
         Cols: [XY portrait | YZ portrait-thin | GAP] per time window
+
+    z_slice=None (default): XY is the projection over all z, YZ over all x.
+    z_slice=k: the XY panel shows only coarse-z bins k .. k+z_slab-1 (mean over that slab, no
+    projection over the other planes); the YZ panel is unchanged and a vertical line marks the slab.
     """
     from matplotlib.gridspec import GridSpec
     from matplotlib.colors import TwoSlopeNorm
@@ -301,8 +308,11 @@ def plot_group_comparison(
                 ax_yz.axis("off")
                 continue
 
-            # XY portrait: mean over Z → (Xc,Yc) → .T → (Yc,Xc)
-            xy = _proj(vol, axis=2, mode=proj_mode)
+            # XY portrait: projection over Z (or one z slab) → (Xc,Yc) → .T → (Yc,Xc)
+            if z_slice is None:
+                xy = _proj(vol, axis=2, mode=proj_mode)
+            else:
+                xy = _proj(vol[:, :, z_slice:z_slice + z_slab], axis=2, mode=proj_mode)
             if np.isfinite(xy).any():
                 last_im = ax_xy.imshow(
                     xy.T, cmap=cmap, norm=norm,
@@ -319,6 +329,8 @@ def plot_group_comparison(
                     origin="upper", aspect="equal",
                     interpolation="nearest",
                 )
+                if z_slice is not None:      # mark the plane(s) shown in the XY panel
+                    ax_yz.axvline(z_slice + (z_slab - 1) / 2.0, color="k", lw=0.8, alpha=0.7)
             ax_yz.axis("off")
 
         # group label — close to plot left edge

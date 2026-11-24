@@ -3,12 +3,18 @@ run_glm_dprime_map.py
 =====================
 N-fish presence brain maps for tonic and phasic d' responders.
 
-The tonic responder set comes from the config:  TONIC_RESPONDER_SOURCE = "dz" (default; top-p% of |max ΔZ|,
-stage F1, run_tonic_dz.py) or "glm" (GLM ΔR² + IAAFT null, optional stage F2). Override with --tonic-source.
+Three maps, each with its own parameter-labelled file name (the two tonic methods never share a file):
+    tonic_dz_presence_map_top{p}.png                    tonic ΔZ, top-p% of |max ΔZ|  (stage F1, run_tonic_dz.py)
+    tonic_glm_presence_map_{NULL_TAG}_nullp{N}.png      tonic GLM ΔR² + IAAFT null    (optional stage F2)
+    phasic_dprime_presence_map_{NULL_TAG}_nullp{N}.png  phasic d′ + per-fish IAAFT null (stage G)
+Each map is a two-step product: the per-voxel fish counts are saved first as <stem>_counts.npz, then the PNG is
+drawn from that file (--plot-only re-draws without touching the per-fish files).
 
-Outputs (saved to {dir_analysis}/comparisons/{COMPARISON_TAG}/figures/):
-    tonic_presence_map.png
-    phasic_presence_map.png
+Outputs go to {dir_analysis}/comparisons/{COMPARISON_TAG}/figures/.
+
+--tonic-source {dz,glm,both}   default both. A method whose per-fish files are missing is skipped with a message
+                               (the GLM maps need stage F2 to have been run under the current param folder).
+--plot-only                    re-draw PNGs from existing *_counts.npz
 
 Layout per PNG:
                      [POS]    [Reds CB]   [NEG]    [Blues CB]
@@ -52,9 +58,10 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--config", required=True,
                     help="Config module name under chemogenetic/config/, "
                          "e.g. config_hcrt_trpv1_csn_120min")
-parser.add_argument("--tonic-source", choices=("dz", "glm"), default=None,
-                    help="tonic responder set: dz (stage F1, default) or glm (optional stage F2); "
-                         "default = TONIC_RESPONDER_SOURCE in the config")
+parser.add_argument("--tonic-source", choices=("dz", "glm", "both"), default="both",
+                    help="tonic method(s) to map: dz (stage F1), glm (optional stage F2) or both (default)")
+parser.add_argument("--plot-only", action="store_true",
+                    help="re-draw PNGs from existing *_counts.npz; do not read the per-fish responder files")
 args, _ = parser.parse_known_args()
 
 cfg = importlib.import_module(f"chemogenetic.config.{args.config}")
@@ -68,14 +75,14 @@ COMPARISON_TAG = cfg.COMPARISON_TAG
 NULL_TAG       = cfg.NULL_TAG
 GLM_PTAG       = int(cfg.RESPONDER_NULL_THRESH)
 DPRIME_PTAG    = int(getattr(cfg, "PHASIC_RESPONDER_NULL_THRESH", 99))
-TONIC_SOURCE   = args.tonic_source or getattr(cfg, "TONIC_RESPONDER_SOURCE", "dz")
 from chemogenetic.tonic_dz import ptag as _dz_ptag, responder_paths as _dz_paths, tonic_dz_params  # noqa: E402
 DZ_P           = tonic_dz_params(cfg)["top_percent"]
 
 from chemogenetic.brainmap import _coarse_shape, _voxelize_presence   # noqa: E402
 
 # ── pipeline parameters ───────────────────────────────────────────────────────
-BRAIN_SHAPE = (280, 544, 40)   # (X, Y, Z) template — verify with ants.image_read().shape
+BRAIN_SHAPE = (288, 568, 40)   # (X, Y, Z) template (checked: medoids_template_vox max = 287, 567, 39);
+                               # a smaller shape silently drops cells at the edges
 DS          = (5, 5, 2)        # coarse downsampling (X, Y, Z)
 DPI         = 150
 
@@ -98,9 +105,9 @@ def _fish_dir(proj_id, expt_id):
     return DIR_ANALYSIS / proj_id / expt_id
 
 
-def _tonic_paths(proj_id, expt_id):
+def _tonic_paths(proj_id, expt_id, source):
     d = _fish_dir(proj_id, expt_id)
-    if TONIC_SOURCE == "dz":
+    if source == "dz":
         return _dz_paths(d, DZ_P)
     return (
         d / f"tonic_pos_glm_{NULL_TAG}_nullp{GLM_PTAG}_idxs.npy",
@@ -119,10 +126,11 @@ def _phasic_paths(proj_id, expt_id):
 # ── load one fish ─────────────────────────────────────────────────────────────
 
 def _load_fish(proj_id, expt_id, mode):
+    """mode: "dz" | "glm" | "phasic"."""
     coords_path = _fish_dir(proj_id, expt_id) / "medoids_template_vox.npy"
     pos_path, neg_path = (
-        _tonic_paths(proj_id, expt_id) if mode == "tonic"
-        else _phasic_paths(proj_id, expt_id)
+        _phasic_paths(proj_id, expt_id) if mode == "phasic"
+        else _tonic_paths(proj_id, expt_id, mode)
     )
 
     missing = [p.name for p in [coords_path, pos_path, neg_path] if not p.exists()]
@@ -337,22 +345,26 @@ def plot_presence_map(
     print(f"  → saved: {out.name}")
 
 
-# ── delete old run_glm_brainmap outputs ───────────────────────────────────────
+# ── map specs ─────────────────────────────────────────────────────────────────
 
-def _delete_old_outputs():
-    old_patterns = [
-        "glm_brainmap_dR2*.png", "glm_brainmap_sign*.png", "glm_brainmap_density*.png",
-        "glm_dR2_map*.png",      "glm_sign_map*.png",      "glm_density_map*.png",
-    ]
-    deleted = []
-    for pattern in old_patterns:
-        for p in COMPARISON_FIG_DIR.glob(pattern):
-            p.unlink()
-            deleted.append(p.name)
-    if deleted:
-        print(f"  Deleted {len(deleted)} old output(s): {deleted}")
-    else:
-        print("  No old outputs found to delete.")
+def _map_specs():
+    """(mode, metric_name, ptag, file stem) for every requested map."""
+    specs = []
+    if args.tonic_source in ("dz", "both"):
+        specs.append(("dz", "Tonic ΔZ", f"top {DZ_P:g}% |max ΔZ|",
+                      f"tonic_dz_presence_map_top{_dz_ptag(DZ_P)}"))
+    if args.tonic_source in ("glm", "both"):
+        specs.append(("glm", "Tonic GLM ΔR²", f"{NULL_TAG} null p{GLM_PTAG}",
+                      f"tonic_glm_presence_map_{NULL_TAG}_nullp{GLM_PTAG}"))
+    specs.append(("phasic", "Phasic d′", f"{NULL_TAG} null p{DPRIME_PTAG}",
+                  f"phasic_dprime_presence_map_{NULL_TAG}_nullp{DPRIME_PTAG}"))
+    return specs
+
+
+def _save_counts(path, ctrl_pos, ctrl_neg, expt_pos, expt_neg, n_ctrl, n_expt):
+    np.savez_compressed(str(path), ctrl_pos=ctrl_pos, ctrl_neg=ctrl_neg, expt_pos=expt_pos, expt_neg=expt_neg,
+                        n_ctrl=n_ctrl, n_expt=n_expt, ds=np.array(DS), brain_shape=np.array(BRAIN_SHAPE))
+    print(f"  → saved: {path.name}")
 
 
 # ── main ──────────────────────────────────────────────────────────────────────
@@ -362,45 +374,47 @@ def main():
     print(f"ctrl_fish     : {len(ctrl_fish)} fish")
     print(f"expt_fish     : {len(expt_fish)} fish")
     print(f"COMPARISON_TAG: {COMPARISON_TAG}")
-    tonic_desc = (f"top {DZ_P:g}% |max ΔZ| (F1)" if TONIC_SOURCE == "dz" else f"GLM IAAFT p{GLM_PTAG} (F2)")
-    print(f"Tonic: {tonic_desc}  |  Phasic d′ p{DPRIME_PTAG}")
+    print(f"Tonic source  : {args.tonic_source}  (ΔZ: top {DZ_P:g}%; GLM: {NULL_TAG} p{GLM_PTAG})  |  Phasic d′ p{DPRIME_PTAG}")
     print(f"Output → {COMPARISON_FIG_DIR}\n")
 
-    # (the old "delete run_glm_brainmap outputs" step was removed: run_glm_brainmap.py is part of the
-    #  optional GLM stage F2 and its figures must survive)
+    # (run_glm_brainmap.py belongs to the optional GLM stage F2 and its figures must survive: nothing is deleted)
+    n_done = 0
+    for mode, metric_name, ptag, stem in _map_specs():
+        print(f"\n{'='*62}\n  {metric_name} presence map  ({ptag})\n{'='*62}")
+        npz = COMPARISON_FIG_DIR / f"{stem}_counts.npz"
 
-    if TONIC_SOURCE == "dz":
-        tonic_row = ("tonic", "Tonic ΔZ", f"top {DZ_P:g}% |max ΔZ|", "tonic_presence_map.png")
-    else:
-        tonic_row = ("tonic", "Tonic GLM", f"IAAFT p{GLM_PTAG}", "tonic_presence_map_glm.png")
-    for mode, metric_name, ptag, fname in [
-        tonic_row,
-        ("phasic", "Phasic d′", f"IAAFT p{DPRIME_PTAG}", "phasic_presence_map.png"),
-    ]:
-        print(f"\n{'='*62}")
-        print(f"  {metric_name} presence maps  ({ptag})")
-        print(f"{'='*62}")
+        if args.plot_only:
+            if not npz.exists():
+                print(f"  ⚠️  {npz.name} not found — skipping (run without --plot-only first)")
+                continue
+        else:
+            print(f"\n── CTRL  ({len(ctrl_fish)} fish) ──")
+            ctrl_pos, ctrl_neg, n_ctrl = compute_count_maps(ctrl_fish, mode)
+            print(f"\n── EXPT  ({len(expt_fish)} fish) ──")
+            expt_pos, expt_neg, n_expt = compute_count_maps(expt_fish, mode)
+            if n_ctrl + n_expt == 0:
+                hint = {"glm": "run stage F2 (submit_glm.sh) under the current param_folder_name first",
+                        "dz": "run stage F1 (submit_tonic_dz.sh) first",
+                        "phasic": "run stage G (submit_dprime.sh) first"}[mode]
+                print(f"  ⚠️  no fish with {metric_name} responder files — skipping this map ({hint})")
+                continue
+            _save_counts(npz, ctrl_pos, ctrl_neg, expt_pos, expt_neg, n_ctrl, n_expt)
 
-        print(f"\n── CTRL  ({len(ctrl_fish)} fish) ──")
-        ctrl_pos, ctrl_neg, n_ctrl = compute_count_maps(ctrl_fish, mode)
-
-        print(f"\n── EXPT  ({len(expt_fish)} fish) ──")
-        expt_pos, expt_neg, n_expt = compute_count_maps(expt_fish, mode)
-
-        print(f"\nPlotting → {fname} ...")
+        z = np.load(str(npz))
+        if tuple(z["brain_shape"].tolist()) != tuple(BRAIN_SHAPE):
+            print(f"  ⚠️  {npz.name} was made with brain_shape {tuple(z['brain_shape'].tolist())}, now {tuple(BRAIN_SHAPE)} "
+                  f"— skipping; rerun without --plot-only")
+            continue
+        print(f"\nPlotting → {stem}.png ...")
         plot_presence_map(
-            ctrl_pos, ctrl_neg,
-            expt_pos, expt_neg,
-            n_ctrl=n_ctrl,
-            n_expt=n_expt,
-            metric_name=metric_name,
-            ptag=ptag,
-            fig_dir=COMPARISON_FIG_DIR,
-            filename=fname,
-            dpi=DPI,
+            z["ctrl_pos"], z["ctrl_neg"], z["expt_pos"], z["expt_neg"],
+            n_ctrl=int(z["n_ctrl"]), n_expt=int(z["n_expt"]),
+            metric_name=metric_name, ptag=ptag,
+            fig_dir=COMPARISON_FIG_DIR, filename=f"{stem}.png", dpi=DPI,
         )
+        n_done += 1
 
-    print("\nAll done.")
+    print(f"\nAll done ({n_done} map(s)).")
 
 
 if __name__ == "__main__":

@@ -8,9 +8,12 @@ SCRIPT="chemogenetic/run/run_glm_dprime_map.py"
 LOG_DIR="logs/brainmap"
 
 CONFIG=""
+EXTRA=""
 while [[ $# -gt 0 ]]; do
     case $1 in
         --config) CONFIG="$2"; shift 2 ;;
+        --tonic-source) EXTRA="$EXTRA --tonic-source $2"; shift 2 ;;   # dz | glm | both (default both)
+        --plot-only) EXTRA="$EXTRA --plot-only"; shift ;;
         *) echo "Unknown argument: $1"; exit 1 ;;
     esac
 done
@@ -39,7 +42,7 @@ sbatch \
     --mem=16G \
     --time=1:00:00 \
     --output="${LOG_DIR}/${CONFIG}.log" \
-    --wrap="$PYTHON $SCRIPT --config $CONFIG" || { echo "ERROR: sbatch failed (message above). Nothing was submitted."; exit 1; }
+    --wrap="$PYTHON $SCRIPT --config $CONFIG$EXTRA" || { echo "ERROR: sbatch failed (message above). Nothing was submitted."; exit 1; }
 
 echo "Submitted."
 echo "Monitor: squeue -u \$USER"
