@@ -16,12 +16,12 @@ Needs the epoch arrays made by run_temporal_intensity_map.py with the CURRENT ep
 message for fish whose cache is missing or stale) and medoids_template_vox.npy.
 
 z planes: coarse-z bin k covers template planes dz·k … dz·k+dz−1 (dz = 2 with the default DS). Choose them with
---z-bins 3,6,9,12 (default: --n-planes 6 spread evenly over the bins that hold cells). --slab N averages N neighbouring
-bins (default 1). Each page title gives the bin and the template planes.
+--z-bins 3,6,9,12, or --z-bins all (every bin that holds at least one cell; default: --n-planes 6 spread evenly over
+the bins that hold cells). --slab N averages N neighbouring bins (default 1; with --z-bins all and --slab N the pages step by N). Each page title gives the bin and the template planes.
 
 Usage:
     python chemogenetic/run/run_temporal_zplanes.py --config config_hcrt_trpv1_csn_120min
-    python chemogenetic/run/run_temporal_zplanes.py --config … --plot-only --z-bins 2,5,8,11,14,17 --slab 2
+    python chemogenetic/run/run_temporal_zplanes.py --config … --plot-only --z-bins all
 """
 import argparse
 import gc
@@ -43,7 +43,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--config", required=True, help="Config module under chemogenetic/config/")
-parser.add_argument("--z-bins", default=None, help="comma-separated coarse-z bins, e.g. 3,6,9,12 (default: evenly spaced)")
+parser.add_argument("--z-bins", default=None, help="comma-separated coarse-z bins, e.g. 3,6,9,12, or 'all' = every bin with cells (default: evenly spaced)")
 parser.add_argument("--n-planes", type=int, default=6, help="number of planes when --z-bins is not given (default 6)")
 parser.add_argument("--slab", type=int, default=1, help="coarse-z bins averaged per page (default 1)")
 parser.add_argument("--plot-only", action="store_true", help="draw from the saved npz; do not touch the per-fish files")
@@ -174,12 +174,16 @@ def _ref_df(z, metric):
 
 def _choose_bins(z):
     cnt = z["zcount_dz_ctrl"] + z["zcount_dz_expt"]
-    if args.z_bins:
+    if args.z_bins and args.z_bins.strip().lower() == "all":
+        occ = np.where(cnt > 0)[0]
+        bins = list(range(int(occ.min()), int(occ.max()) + 1, args.slab))
+    elif args.z_bins:
         bins = [int(b) for b in args.z_bins.split(",")]
     else:
         occ = np.where(cnt >= 0.10 * cnt.max())[0]
         bins = sorted(set(np.linspace(occ.min(), occ.max(), args.n_planes).round().astype(int).tolist()))
     zc = len(cnt)
+    bins = [b for b in bins if b + args.slab <= zc] if (args.z_bins or "").strip().lower() == "all" else bins
     bad = [b for b in bins if b < 0 or b + args.slab > zc]
     if bad:
         sys.exit(f"❌ z bins {bad} with --slab {args.slab} fall outside 0..{zc - 1}")
@@ -207,7 +211,7 @@ def plot():
     bins, cnt = _choose_bins(z)
     labels = [str(s) for s in z["window_labels"]]
     wvols = [tuple(v) for v in z["window_vols"].tolist()]
-    btag = "-".join(str(b) for b in bins)
+    btag = "all" if (args.z_bins and args.z_bins.strip().lower() == "all") else "-".join(str(b) for b in bins)
     for metric, mlabel, title in (("dz", "Tonic ΔZ", "Tonic ΔZ"), ("dprime", "Phasic d′", "Phasic d′")):
         df, cols = _ref_df(z, metric)
         out = FIG_DIR / f"temporal_{metric}_zplanes_DS{DS_TAG}_slab{args.slab}_z{btag}.pdf"

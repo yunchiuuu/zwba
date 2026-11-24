@@ -8,6 +8,7 @@ TIME="${ZWBA_TIME:-2:00:00}"   # walltime; override per call: ZWBA_TIME=48:00:00
 # Usage (from repo root):
 #     bash chemogenetic/submit/submit_temporal_zplanes.sh --config config_hcrt_trpv1_csn_120min
 #     ... --z-bins 3,6,9,12,15,18 --slab 1        choose the planes (coarse-z bins)
+#     ... --z-bins all                            every z bin that holds cells (one page each)
 #     ... --n-planes 8                            number of evenly spaced planes (default 6)
 #     ... --plot-only                             redraw from the saved volumes (other planes, no recompute)
 
