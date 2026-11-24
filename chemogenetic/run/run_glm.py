@@ -112,6 +112,7 @@ from chemogenetic.glm import (
     get_fit_window_indices,
     get_run_dir,
 )
+from chemogenetic.cell_filter import ensure_cell_valid, filter_params
 from chemogenetic.epochs import get_epochs
 from chemogenetic.regressor import build_regressor, check_regressor_vs_recording
 from utils.data_io import fish_dir
@@ -254,6 +255,31 @@ def _preflight():
                 continue
             if old != exp_fit_start:
                 stale.append(f"    {f[1]}: existing fit starts at vol {old}, config gives vol {exp_fit_start}")
+    # Cell filter: cell_valid.npy is normally written by run_decompose.py; built here if missing/stale.
+    # Fit outputs made with a different mask are detected (the GLM folder name does not encode it).
+    mask_sha = {}
+    for f in all_fish:
+        _, sha, info = ensure_cell_valid(fish_dir(dir_analysis, f), EPOCHS, cfg, verbose=False)
+        mask_sha[f] = sha
+        print(f"  cell filter {f[1]}: excluded {info['n_excluded']:,}/{info['n_cells']:,}")
+    mask_stale = []
+    for f in all_fish:
+        _, rd = get_run_dir(dir_analysis, f, K_global, drift_global, lam_global,
+                            input_tag, lag_global)
+        for tag, name in (("ablation", "RUN_META_ABLATION.json"), ("null", f"RUN_META_NULL__{NULL_TAG}.json")):
+            mp = rd / name
+            if mp.exists():
+                try:
+                    made_with = json.loads(mp.read_text()).get("cell_valid_sha")
+                except Exception:    # noqa: BLE001
+                    made_with = None
+                if made_with != mask_sha[f]:
+                    mask_stale.append(f"    {f[1]}: {tag} made without / with a different cell filter")
+    if mask_stale and not ({"ablation", "null"} <= OVERWRITE_STAGES and RUN_ABLATION and RUN_NULL):
+        raise PipelineError(
+            "Existing GLM outputs were made without (or with a different) cell filter (cell_valid.npy):\n"
+            + "\n".join(mask_stale) + "\n  Recompute the mask-dependent stages (refit is not affected): "
+            "--stages ablation,null,responders --overwrite ablation,null,responders")
     if stale and not rebuilt:
         raise PipelineError(
             "Existing GLM outputs were fit with a different window (INCLUDED_BASELINE changed):\n"
@@ -279,6 +305,7 @@ def main():
     print(f"  K={K_global}  drift={drift_global}  lam={lam_global}  "
           f"lag={lag_global}  null={NULL_TAG} p{RESPONDER_NULL_THRESH}")
     print(f"  epochs: {EPOCHS.describe()}")
+    print(f"  cell filter: {filter_params(cfg)}")
     print(f"  responder sign windows (min from fit start): "
           f"baseline {BASELINE_WIN_MIN[0]:g}-{BASELINE_WIN_MIN[1]:g}, "
           f"drug {DRUG_WIN_MIN[0]:g}-{DRUG_WIN_MIN[1]:g}\n")

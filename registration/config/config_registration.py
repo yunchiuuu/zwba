@@ -80,19 +80,19 @@ _CTRL_PROJ_CSN = "huc-h2b-g8m_csn_120min"
 
 ctrl_fish_csn = [
     # (_CTRL_PROJ_CSN, "251021_huc-h2b-g8m_csn_10uM_fish1"),
-    # (_CTRL_PROJ_CSN, "251118_huc-h2b-g8m_csn_10uM_fish1"),
     # (_CTRL_PROJ_CSN, "251118_huc-h2b-g8m_csn_10uM_fish2"),
     # (_CTRL_PROJ_CSN, "251118_huc-h2b-g8m_csn_10uM_fish3"),
     # (_CTRL_PROJ_CSN, "251118_huc-h2b-g8m_csn_10uM_fish4"),
     # (_CTRL_PROJ_CSN, "251118_huc-h2b-g8m_csn_10uM_fish5"),
-    # (_CTRL_PROJ_CSN, "251126_huc-h2b-g8m_csn_10uM_fish1"),
-]  # N = 7
+    (_CTRL_PROJ_CSN, "260825_huc-h2b-g8m_csn_10uM_fish2")
+    
+]  # N = 6
 
 # ── CSN 120min — EXPT (hcrt-trpv1_huc-h2b-g8m) — main cohort ───────────────
 _EXPT_PROJ_CSN = "hcrt-trpv1_huc-h2b-g8m_csn_120min"
 
 expt_fish_csn = [
-    (_EXPT_PROJ_CSN, "251008_hcrt-trpv1_huc-h2b-g8m_csn_10uM_fish4"),
+    # (_EXPT_PROJ_CSN, "251008_hcrt-trpv1_huc-h2b-g8m_csn_10uM_fish4"),
     # (_EXPT_PROJ_CSN, "251102_hcrt-trpv1_huc-h2b-g8m_csn_10uM_fish1"),
     # (_EXPT_PROJ_CSN, "251102_hcrt-trpv1_huc-h2b-g8m_csn_10uM_fish2"),
     # (_EXPT_PROJ_CSN, "251210_hcrt-trpv1_huc-h2b-g8m_csn_10uM_fish1"),
@@ -101,6 +101,7 @@ expt_fish_csn = [
     # (_EXPT_PROJ_CSN, "260514_hcrt-trpv1_huc-h2b-g8m_csn_10uM_fish1"),
     # (_EXPT_PROJ_CSN, "260514_hcrt-trpv1_huc-h2b-g8m_csn_10uM_fish2"),
     # (_EXPT_PROJ_CSN, "260515_hcrt-trpv1_huc-h2b-g8m_csn_10uM_fish1"),
+    (_EXPT_PROJ_CSN, "260824_hcrt-trpv1_huc-h2b-g8m_csn_10uM_fish1")
 ]  # N = 9
 
 # ── CSN 120min — EXPT with transient hcrt-h2b-g8m injection ─────────────────
@@ -128,9 +129,9 @@ ynt_fish = [
 _EXPT_PROJ_CSN_AUDIO = "hcrt-trpv1_huc-h2b-g8m_csn_120min_audio"
 
 expt_fish_csn_audio = [
-    (_EXPT_PROJ_CSN_AUDIO, "260707_hcrt-trpv1_huc-h2b-g8m_csn_10uM_audio_fish1"),
+   # (_EXPT_PROJ_CSN_AUDIO, "260707_hcrt-trpv1_huc-h2b-g8m_csn_10uM_audio_fish1"),
    # (_EXPT_PROJ_CSN_AUDIO, "260707_hcrt-trpv1_huc-h2b-g8m_csn_10uM_audio_fish2"),
-    (_EXPT_PROJ_CSN_AUDIO, "260707_hcrt-trpv1_huc-h2b-g8m_csn_10uM_audio_fish3"),
+   # (_EXPT_PROJ_CSN_AUDIO, "260707_hcrt-trpv1_huc-h2b-g8m_csn_10uM_audio_fish3"),
    # (_EXPT_PROJ_CSN_AUDIO, "260708_hcrt-trpv1_huc-h2b-g8m_csn_10uM_audio_fish1"),
 ]  # N = 4
 
@@ -141,8 +142,8 @@ expt_fish_csn_audio = [
 # ============================================================
 # Alias used by run_registration_syn.py — registers any fish in this list
 all_fish = ( 
-    ctrl_fish_csn       # N = 7
-    + expt_fish_csn     # N = 9
+    ctrl_fish_csn       # N = 6
+    + expt_fish_csn     # N = 10
     + expt_fish_csn_inj # N = 3
     + ynt_fish          # N = 6 
     + expt_fish_csn_audio # N = 3

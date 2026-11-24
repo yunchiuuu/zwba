@@ -146,6 +146,29 @@ RESPONDER_NULL_THRESH = 99             # null percentile for responder cutoff
 PHASIC_RESPONDER_NULL_THRESH = 99          # IAAFT null percentile for the phasic d' responder validation
 L_MIN = 10.0                           # plateau duration (minutes) for plateau-ΔZ
 
+
+# ============================================================
+# CELL FILTER  (valid-cell mask; F_tonic / F_phasic are never modified)
+# ============================================================
+# run_decompose.py writes cell_valid.npy per fish; every later stage sets the excluded cells' ΔZ, d',
+# and GLM ΔR² to NaN (so they are never responders and drop out of the maps) and samples the IAAFT
+# nulls from valid cells only. Criteria use the BASELINE epoch only (independent of the drug effect):
+CELL_MAX_ZERO_FRAC     = 0.10     # exclude: > this fraction of baseline samples with F_tonic <= 0 (clipped dim cells)
+CELL_MIN_BASELINE_SD   = 1e-3     # exclude: baseline SD of F_tonic below this (ΔZ divides by it; counts)
+CELL_MIN_BASELINE_MEAN = 1.0      # exclude: baseline mean of F_tonic below this (counts)
+CELL_MAX_ABS_DZ        = 200.0    # backstop on cells that passed the above: max |tonic ΔZ| over the windows; None = off
+
+
+# ============================================================
+# TONIC RESPONDERS  (stage F1: ΔZ of F_tonic; replaces the GLM ΔR² as the definition. The GLM is optional stage F2)
+# ============================================================
+# Rank-based, within each fish: top p % of |max ΔZ| (max over the seven temporal windows, sign from that window),
+# ranked inside baseline-σ strata. No null: the responder FRACTION is fixed by p and not comparable between groups.
+TONIC_DZ_TOP_PERCENT      = 5.0          # main set
+TONIC_DZ_TOP_PERCENT_SENS = [2.5, 10.0]  # sensitivity sets, saved next to the main one
+TONIC_DZ_N_STRATA         = 5            # baseline-σ strata per fish (1 = no stratification)
+TONIC_RESPONDER_SOURCE    = "dz"         # which tonic set presence maps read: "dz" (F1) or "glm" (F2)
+
 # Derived: subfolder name for all GLM outputs (defined once, used everywhere)
 param_folder_name = (
     f"in{input_tag}_K{K_global}_drift{drift_global}_lam{lam_global}_lag{lag_global}_fit25"
@@ -153,7 +176,7 @@ param_folder_name = (
 
 
 # ============================================================
-# TONIC GLM REGRESSOR  — defined by YOU; REQUIRED (there is no fallback)
+# TONIC GLM REGRESSOR  (optional stage F2 only) — defined by YOU; REQUIRED for run_glm.py (no fallback)
 # ============================================================
 # The GLM kernel is fit to this trace. run_glm.py stops with an error if it cannot be
 # read. One CSV per reference recording; `regressor_column` is the raw trace (one value

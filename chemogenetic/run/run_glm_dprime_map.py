@@ -1,7 +1,10 @@
 """
 run_glm_dprime_map.py
 =====================
-N-fish presence brain maps for tonic GLM and phasic d' responders.
+N-fish presence brain maps for tonic and phasic d' responders.
+
+The tonic responder set comes from the config:  TONIC_RESPONDER_SOURCE = "dz" (default; top-p% of |max ΔZ|,
+stage F1, run_tonic_dz.py) or "glm" (GLM ΔR² + IAAFT null, optional stage F2). Override with --tonic-source.
 
 Outputs (saved to {dir_analysis}/comparisons/{COMPARISON_TAG}/figures/):
     tonic_presence_map.png
@@ -49,6 +52,9 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--config", required=True,
                     help="Config module name under chemogenetic/config/, "
                          "e.g. config_hcrt_trpv1_csn_120min")
+parser.add_argument("--tonic-source", choices=("dz", "glm"), default=None,
+                    help="tonic responder set: dz (stage F1, default) or glm (optional stage F2); "
+                         "default = TONIC_RESPONDER_SOURCE in the config")
 args, _ = parser.parse_known_args()
 
 cfg = importlib.import_module(f"chemogenetic.config.{args.config}")
@@ -62,6 +68,9 @@ COMPARISON_TAG = cfg.COMPARISON_TAG
 NULL_TAG       = cfg.NULL_TAG
 GLM_PTAG       = int(cfg.RESPONDER_NULL_THRESH)
 DPRIME_PTAG    = int(getattr(cfg, "PHASIC_RESPONDER_NULL_THRESH", 99))
+TONIC_SOURCE   = args.tonic_source or getattr(cfg, "TONIC_RESPONDER_SOURCE", "dz")
+from chemogenetic.tonic_dz import ptag as _dz_ptag, responder_paths as _dz_paths, tonic_dz_params  # noqa: E402
+DZ_P           = tonic_dz_params(cfg)["top_percent"]
 
 from chemogenetic.brainmap import _coarse_shape, _voxelize_presence   # noqa: E402
 
@@ -91,6 +100,8 @@ def _fish_dir(proj_id, expt_id):
 
 def _tonic_paths(proj_id, expt_id):
     d = _fish_dir(proj_id, expt_id)
+    if TONIC_SOURCE == "dz":
+        return _dz_paths(d, DZ_P)
     return (
         d / f"tonic_pos_glm_{NULL_TAG}_nullp{GLM_PTAG}_idxs.npy",
         d / f"tonic_neg_glm_{NULL_TAG}_nullp{GLM_PTAG}_idxs.npy",
@@ -316,7 +327,7 @@ def plot_presence_map(
     # ── suptitle ─────────────────────────────────────────────────────────
     fig.suptitle(
         f"{metric_name} responders  |  N-fish presence map  |  "
-        f"IAAFT p{ptag}  |  DS={DS}",
+        f"{ptag}  |  DS={DS}",
         fontsize=8.5, y=0.995, color="#222222",
     )
 
@@ -351,18 +362,23 @@ def main():
     print(f"ctrl_fish     : {len(ctrl_fish)} fish")
     print(f"expt_fish     : {len(expt_fish)} fish")
     print(f"COMPARISON_TAG: {COMPARISON_TAG}")
-    print(f"GLM  p{GLM_PTAG}  |  Phasic d′ p{DPRIME_PTAG}")
+    tonic_desc = (f"top {DZ_P:g}% |max ΔZ| (F1)" if TONIC_SOURCE == "dz" else f"GLM IAAFT p{GLM_PTAG} (F2)")
+    print(f"Tonic: {tonic_desc}  |  Phasic d′ p{DPRIME_PTAG}")
     print(f"Output → {COMPARISON_FIG_DIR}\n")
 
-    print("Deleting old run_glm_brainmap outputs ...")
-    _delete_old_outputs()
+    # (the old "delete run_glm_brainmap outputs" step was removed: run_glm_brainmap.py is part of the
+    #  optional GLM stage F2 and its figures must survive)
 
+    if TONIC_SOURCE == "dz":
+        tonic_row = ("tonic", "Tonic ΔZ", f"top {DZ_P:g}% |max ΔZ|", "tonic_presence_map.png")
+    else:
+        tonic_row = ("tonic", "Tonic GLM", f"IAAFT p{GLM_PTAG}", "tonic_presence_map_glm.png")
     for mode, metric_name, ptag, fname in [
-        ("tonic",  "Tonic GLM", GLM_PTAG,    "tonic_presence_map.png"),
-        ("phasic", "Phasic d′", DPRIME_PTAG, "phasic_presence_map.png"),
+        tonic_row,
+        ("phasic", "Phasic d′", f"IAAFT p{DPRIME_PTAG}", "phasic_presence_map.png"),
     ]:
         print(f"\n{'='*62}")
-        print(f"  {metric_name} presence maps  (IAAFT p{ptag})")
+        print(f"  {metric_name} presence maps  ({ptag})")
         print(f"{'='*62}")
 
         print(f"\n── CTRL  ({len(ctrl_fish)} fish) ──")

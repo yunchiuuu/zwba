@@ -14,21 +14,36 @@ Three amplitude modes are supported:
     "rms" — F_phasic² (energy proxy)
 
 Outputs saved per fish under dir_analysis / proj_ID / expt_ID/:
-    phasic_dprime_cells_{mode}.npy      (n_cells,)
-    phasic_deltaMean_cells_{mode}.npy   (n_cells,)
+    phasic_dprime_cells_{mode}.npy      (n_cells,)   NaN for cells excluded by cell_valid.npy
+    phasic_deltaMean_cells_{mode}.npy   (n_cells,)   NaN for cells excluded by cell_valid.npy
+    phasic_dprime_meta_{mode}.json      cell_valid fingerprint the arrays were made with
+
+Cells excluded by the cell filter (chemogenetic/cell_filter.py, cell_valid.npy) get NaN, so they
+are never responders and drop out of every nanmean; the IAAFT null is sampled from valid cells only.
+Outputs made with a different (or no) mask are recomputed automatically.
 
 Location:
     ~/Zebrafish-whole-brain-analysis/chemogenetic/dprime.py
 """
 
 import gc
+import json
 from pathlib import Path
 
 import numpy as np
 from joblib import Parallel, delayed
 from tqdm.auto import tqdm
 
+from chemogenetic.cell_filter import load_cell_valid, mask_rows
 from utils.data_io import fish_dir
+
+
+def _sidecar_sha(path):
+    """cell_valid fingerprint recorded next to a d′ output (None if absent/unreadable)."""
+    try:
+        return json.loads(Path(path).read_text()).get("cell_valid_sha")
+    except Exception:       # noqa: BLE001
+        return None
 
 
 # ============================================================
@@ -203,10 +218,7 @@ def dprime_one_fish(
 
     dprime_path = out_dir / f"phasic_dprime_cells_{amplitude_mode}.npy"
     dmean_path  = out_dir / f"phasic_deltaMean_cells_{amplitude_mode}.npy"
-
-    if not overwrite and dprime_path.exists() and dmean_path.exists():
-        print(f"⏩ {expt_ID}: d′ exists, skipping.")
-        return {"fish": fish, "status": "skipped"}
+    meta_path   = out_dir / f"phasic_dprime_meta_{amplitude_mode}.json"
 
     Fp_path = out_dir / "f_phasic.npy"
     if not Fp_path.exists():
@@ -214,6 +226,15 @@ def dprime_one_fish(
 
     Fp = np.load(str(Fp_path), mmap_mode="r")
     n_cells, Tfull = Fp.shape
+
+    valid, valid_sha = load_cell_valid(out_dir, expected_n_cells=n_cells)
+
+    if not overwrite and dprime_path.exists() and dmean_path.exists():
+        if _sidecar_sha(meta_path) == valid_sha:
+            print(f"⏩ {expt_ID}: d′ exists, skipping.")
+            return {"fish": fish, "status": "skipped"}
+        print(f"♻️  {expt_ID}: d′ exists but was made without / with a different cell filter "
+              f"— recomputing")
 
     b_s, b_e = _get_window(baseline_start, baseline_end, sampling_rate_hz, offset_sec)
     d_s, d_e = _get_window(drug_start,     drug_end,     sampling_rate_hz, offset_sec)
@@ -234,8 +255,13 @@ def dprime_one_fish(
         clip_abs=clip_abs,
     )
 
+    dprime_cells     = mask_rows(dprime_cells,     valid)
+    delta_mean_cells = mask_rows(delta_mean_cells, valid)
+
     np.save(str(dprime_path), dprime_cells)
     np.save(str(dmean_path),  delta_mean_cells)
+    meta_path.write_text(json.dumps({"cell_valid_sha": valid_sha,
+                                     "n_excluded": int((~valid).sum())}, indent=2))
 
     summ = summarize_fish_dprime(dprime_cells)
 
@@ -330,11 +356,7 @@ def iaaft_null_dprime_one_fish(
     ptag = int(null_percentile)
     thresh_path = out_dir / f"phasic_dprime_iaaft_nullp{ptag}_thresh.npy"
     null_path   = out_dir / "phasic_dprime_null__iaaft.npy"
-
-    if not overwrite and thresh_path.exists():
-        thr = float(np.load(str(thresh_path)))
-        print(f"⏩ {expt_ID}: d′ IAAFT null exists, thr=±{thr:.4f}")
-        return {"fish": fish, "status": "skipped", "thresh": thr}
+    null_meta   = out_dir / "phasic_dprime_null_meta.json"
 
     Fp_path = out_dir / "f_phasic.npy"
     if not Fp_path.exists():
@@ -342,6 +364,16 @@ def iaaft_null_dprime_one_fish(
 
     Fp = np.load(str(Fp_path), mmap_mode="r")
     n_cells, Tfull = Fp.shape
+
+    valid, valid_sha = load_cell_valid(out_dir, expected_n_cells=n_cells)
+
+    if not overwrite and thresh_path.exists():
+        if _sidecar_sha(null_meta) == valid_sha:
+            thr = float(np.load(str(thresh_path)))
+            print(f"⏩ {expt_ID}: d′ IAAFT null exists, thr=±{thr:.4f}")
+            return {"fish": fish, "status": "skipped", "thresh": thr}
+        print(f"♻️  {expt_ID}: d′ IAAFT null exists but was sampled without / with a different "
+              f"cell filter — recomputing")
 
     b_s, b_e = _get_window(baseline_start, baseline_end, sampling_rate_hz, offset_sec)
     d_s, d_e = _get_window(drug_start,     drug_end,     sampling_rate_hz, offset_sec)
@@ -358,8 +390,11 @@ def iaaft_null_dprime_one_fish(
 
     # ── sample cells for the null ──────────────────────────────────────
     rng = np.random.default_rng(seed)
-    n_sample = min(n_cells_null, n_cells)
-    sample_idx = np.sort(rng.choice(n_cells, size=n_sample, replace=False))
+    valid_idx = np.flatnonzero(valid)                 # the null is sampled from valid cells only
+    if valid_idx.size == 0:
+        raise ValueError(f"{expt_ID}: no valid cells (cell_valid.npy excludes every cell)")
+    n_sample = min(n_cells_null, valid_idx.size)
+    sample_idx = np.sort(rng.choice(valid_idx, size=n_sample, replace=False))
 
     # load only the contiguous [b_s, d_e) block for sampled cells
     Fp_block = np.asarray(Fp[sample_idx, b_s:d_e], dtype=np.float32)
@@ -394,6 +429,8 @@ def iaaft_null_dprime_one_fish(
 
     np.save(str(thresh_path), np.array(thr, dtype=np.float32))
     np.save(str(null_path),   null_vals.astype(np.float32))
+    null_meta.write_text(json.dumps({"cell_valid_sha": valid_sha,
+                                     "n_cells_sampled": int(n_sample)}, indent=2))
 
     print(f"✅ {expt_ID}: d′ IAAFT null done | n_surr={n_surrogates} "
           f"n_cells={n_sample} | thr(p{ptag})=±{thr:.4f}")

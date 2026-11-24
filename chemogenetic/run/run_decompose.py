@@ -4,13 +4,17 @@ run_decompose.py
 SLURM entry point: compute F_tonic and F_phasic for all fish.
 
 Reads raw voluseg HDF5 from dir_voluseg, writes .npy arrays to dir_analysis.
-Skips any fish where outputs already exist (set overwrite=True to force).
+Skips any fish where outputs already exist (OVERWRITE_TONIC / OVERWRITE_PHASIC / OVERWRITE_CELL_VALID).
 
 Pipeline per fish:
     Step 0: estimate camera background F_dark from raw volume corner patches
     Step 1: load voluseg traces, subtract F_dark → F_corrected
     Step 2: compute F_tonic (sliding percentile of F_corrected)
     Step 3: compute F_phasic (F_corrected - F_tonic) / F_tonic
+    Step 4: cell filter -> cell_valid.npy (bool mask; F_tonic / F_phasic are NOT modified).
+            Built from the baseline epoch of F_tonic (see chemogenetic/cell_filter.py). Runs for
+            every fish, also when F_tonic / F_phasic already exist (steps 0-3 are then skipped).
+    Step 5: QC figure (top-5 |ΔZ| cells are picked among the valid cells)
 
 Failure handling: every fish is attempted; a failing fish is reported with its traceback,
 the other fish still run, and the job exits with code 1 (SLURM shows FAILED) at the end.
@@ -68,6 +72,7 @@ drug_end            = cfg.drug_end
 from utils.data_io import fish_dir, read_data
 from utils.run_guard import RunGuard, PipelineError, require_paths, run_main, setup_or_exit
 from chemogenetic.epochs import get_epochs
+from chemogenetic.cell_filter import ensure_cell_valid, filter_params
 from utils.preprocess import (
     compute_f_tonic,
     compute_f_phasic,
@@ -80,6 +85,7 @@ from utils.preprocess import (
 # ============================================================
 OVERWRITE_TONIC  = False
 OVERWRITE_PHASIC = False
+OVERWRITE_CELL_VALID = False   # the mask is also rebuilt automatically when its inputs change
 
 DENOM_MODE   = "legacy"    # "legacy" (matches notebook) or "fixed_floor"
 EPS_FLOOR    = 1e-6
@@ -100,7 +106,7 @@ EPOCHS = setup_or_exit(get_epochs, cfg)
 # DECOMPOSITION QC
 # ============================================================
 
-def _plot_decompose_qc(expt_ID, fish_out, tonic_path, phasic_path):
+def _plot_decompose_qc(expt_ID, fish_out, tonic_path, phasic_path, valid=None):
     """
     Save a decomposition QC figure for one fish.
 
@@ -109,8 +115,9 @@ def _plot_decompose_qc(expt_ID, fish_out, tonic_path, phasic_path):
         Row 1: top-5 tonic-ΔZ cells, overlapping z-scored traces
                 (F_tonic left | F_phasic right, same 5 cells)
 
-    Cell selection: subsample 20K cells, compute ΔZ = (μ_drug - μ_bl) / σ_bl,
-    pick top 5 by |ΔZ|. Baseline / drug windows = EPOCHS (first EPOCH_DISCARD_MIN of each
+    Cell selection: subsample 20K cells (valid cells only when `valid` is given, so degenerate
+    cells excluded by the cell filter cannot dominate the panels), compute
+    ΔZ = (μ_drug - μ_bl) / σ_bl, pick top 5 by |ΔZ|. Baseline / drug windows = EPOCHS (first EPOCH_DISCARD_MIN of each
     phase discarded).
     Loads from disk — never re-runs decomposition.
     """
@@ -133,7 +140,11 @@ def _plot_decompose_qc(expt_ID, fish_out, tonic_path, phasic_path):
 
     # ── find top-5 tonic-ΔZ cells via subsample ───────────────────────
     rng  = np.random.default_rng(42)
-    sub  = rng.choice(n_cells, size=min(20_000, n_cells), replace=False)
+    pool = np.flatnonzero(valid) if valid is not None else np.arange(n_cells)
+    if pool.size == 0:
+        print("  ⚠️  QC skipped — no valid cells")
+        return
+    sub  = np.sort(rng.choice(pool, size=min(20_000, pool.size), replace=False))
 
     Ft_sub = Ft[sub].astype(np.float32)
     mu_bl  = Ft_sub[:, bl_s:bl_e].mean(axis=1)
@@ -156,7 +167,7 @@ def _plot_decompose_qc(expt_ID, fish_out, tonic_path, phasic_path):
     Fp_top5 = zscore_traces(Fp[top5_idx].astype(np.float32))  # (5, T)
 
     # ── population mean ± std (subsample 5K) ─────────────────────────
-    sub5k  = rng.choice(n_cells, size=min(5_000, n_cells), replace=False)
+    sub5k  = np.sort(rng.choice(pool, size=min(5_000, pool.size), replace=False))
     Ft_s   = Ft[sub5k].astype(np.float32)
     Fp_s   = Fp[sub5k].astype(np.float32)
     Ft_mean, Ft_std = Ft_s.mean(axis=0), Ft_s.std(axis=0)
@@ -177,7 +188,9 @@ def _plot_decompose_qc(expt_ID, fish_out, tonic_path, phasic_path):
         2, 2, figsize=(16, 8),
         gridspec_kw={"height_ratios": [1, 1.4]},
     )
-    fig.suptitle(f"Decomposition QC: {expt_ID}", fontsize=12)
+    n_ex = 0 if valid is None else int((~valid).sum())
+    fig.suptitle(f"Decomposition QC: {expt_ID}  (cells shown: valid only; {n_ex:,} of {n_cells:,} "
+                 f"excluded by the cell filter)", fontsize=11)
     cmap = plt.cm.tab10
 
     # Row 0: population mean ± std
@@ -250,6 +263,7 @@ def main():
     print(f"  denom_mode   : {DENOM_MODE}")
     print(f"  n_jobs       : {N_JOBS}")
     print(f"  epochs       : {EPOCHS.describe()}")
+    print(f"  cell filter  : {filter_params(cfg)}")
     print()
 
     for fish in all_fish:
@@ -379,9 +393,21 @@ def main():
                 gc.collect()
 
             # ----------------------------------------------------------
-            # Step 4: QC figure (always — loads from disk, never recomputes)
+            # Step 4: cell filter -> cell_valid.npy (always; skipped only when the saved mask
+            # was made from the same f_tonic, epochs and thresholds). F_tonic / F_phasic are
+            # never modified.
             # ----------------------------------------------------------
-            _plot_decompose_qc(expt_ID, fish_out, tonic_path, phasic_path)
+            valid, _, _ = ensure_cell_valid(fish_out, EPOCHS, cfg, overwrite=OVERWRITE_CELL_VALID)
+            n_ex = int((~valid).sum())
+            if n_ex > 0.01 * valid.size:
+                guard.warn(expt_ID, f"cell filter excludes {n_ex:,}/{valid.size:,} cells "
+                                    f"({100 * n_ex / valid.size:.2f}%) — more than 1%; check the "
+                                    f"F_dark / dim-cell clipping above before trusting this fish")
+
+            # ----------------------------------------------------------
+            # Step 5: QC figure (always — loads from disk, never recomputes)
+            # ----------------------------------------------------------
+            _plot_decompose_qc(expt_ID, fish_out, tonic_path, phasic_path, valid)
 
         gc.collect()
 

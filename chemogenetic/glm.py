@@ -47,6 +47,7 @@ import numpy as np
 from tqdm.auto import tqdm
 
 from utils.data_io import fish_dir
+from chemogenetic.cell_filter import load_cell_valid, mask_rows
 from chemogenetic.drug_regressor import build_drug_regressor, delta_signal
 
 
@@ -665,6 +666,7 @@ def ablation_one_fish(fish, dir_analysis, sampling_rate_hz,
 
     Ft = np.load(str(Ft_path), mmap_mode="r")
     n_cells, Tfull = Ft.shape
+    valid, valid_sha = load_cell_valid(base_dir, expected_n_cells=n_cells)
 
     if u_ext is not None:
         C_full  = np.asarray(u_ext, dtype=np.float32).reshape(-1)[:Tfull]
@@ -710,6 +712,7 @@ def ablation_one_fish(fish, dir_analysis, sampling_rate_hz,
         gc.collect()
 
     dR2 = (r2_full - r2_drift).astype(np.float32)
+    dR2 = mask_rows(dR2, valid)        # cells excluded by cell_valid.npy -> NaN (never responders)
     np.save(str(dR2_path), dR2)
 
     with open(str(run_dir / "RUN_META_ABLATION.json"), "w") as f:
@@ -718,9 +721,12 @@ def ablation_one_fish(fish, dir_analysis, sampling_rate_hz,
                    "K_global": int(K_global), "drift_global": int(drift_global),
                    "lam_global": float(lam_global), "Tfit": int(Tfit),
                    "fit_start": int(fit_start), "fit_end": int(fit_end),
-                   "sampling_rate_hz": float(sampling_rate_hz)}, f, indent=2)
+                   "sampling_rate_hz": float(sampling_rate_hz),
+                   "cell_valid_sha": valid_sha,
+                   "n_cells_excluded": int((~valid).sum())}, f, indent=2)
 
-    print(f"✅ {expt_ID}: ablation done | ΔR² p99={float(np.nanpercentile(dR2, 99)):.4f}")
+    print(f"✅ {expt_ID}: ablation done | {int((~valid).sum()):,} excluded cells -> NaN | "
+          f"ΔR² p99={float(np.nanpercentile(dR2, 99)):.4f}")
     del Ft, Y_fit, C_full, dC_full, u_fit, B, Xd_z, W_drift, r2_drift, r2_full, dR2
     gc.collect()
     return {"fish": fish, "status": "ok_ablation"}
@@ -820,6 +826,7 @@ def iaaft_null_one_fish(fish, dir_analysis, sampling_rate_hz,
 
     Ft = np.load(str(Ft_path), mmap_mode="r")
     n_cells, Tfull = Ft.shape
+    valid, valid_sha = load_cell_valid(base_dir, expected_n_cells=n_cells)
 
     if u_ext is not None:
         C_full  = np.asarray(u_ext, dtype=np.float32).reshape(-1)[:Tfull]
@@ -837,8 +844,11 @@ def iaaft_null_one_fish(fish, dir_analysis, sampling_rate_hz,
     Tfit  = fit_end - fit_start
     u_fit = _select_input(C_full, dC_full, input_tag, fit_start, fit_end, lag_global)
     rng = np.random.default_rng(seed)
-    n_null = int(min(n_cells_null, n_cells))
-    idx_null = np.sort(rng.choice(n_cells, size=n_null, replace=False))
+    valid_idx = np.flatnonzero(valid)                  # null cells are drawn from valid cells only
+    if valid_idx.size == 0:
+        raise ValueError(f"{expt_ID}: no valid cells (cell_valid.npy excludes every cell)")
+    n_null = int(min(n_cells_null, valid_idx.size))
+    idx_null = np.sort(rng.choice(valid_idx, size=n_null, replace=False))
     np.save(str(idx_path), idx_null.astype(np.int64))
 
     Y_null = np.asarray(Ft[idx_null, fit_start:fit_end], dtype=np.float32)
@@ -882,6 +892,7 @@ def iaaft_null_one_fish(fish, dir_analysis, sampling_rate_hz,
                    "n_surrogates": int(n_surrogates), "n_iter_iaaft": int(n_iter_iaaft),
                    "n_cells_null_used": int(n_null), "null_percentile": int(null_percentile),
                    "seed": int(seed), "sampling_rate_hz": float(sampling_rate_hz),
+                   "cell_valid_sha": valid_sha,
                    "Tfit": int(Tfit), "fit_start": int(fit_start), "fit_end": int(fit_end),
                    "drug_uM": None if drug_uM is None else float(drug_uM),
                    "V_ml": None if V_ml is None else float(V_ml),
@@ -964,7 +975,21 @@ def save_responder_idx(fish, dir_analysis, sampling_rate_hz,
     dR2_real = np.load(str(dR2_path)).astype(np.float32).ravel()
     thr      = float(np.load(str(thresh_path)))
 
-    is_resp  = np.isfinite(dR2_real) & (dR2_real > thr)
+    valid, valid_sha = load_cell_valid(base_dir, expected_n_cells=dR2_real.size)
+    for tag, mp in (("ablation (ΔR²)", run_dir / "RUN_META_ABLATION.json"),
+                    ("IAAFT null",     _null_output_paths(run_dir, null_tag, null_percentile)[3])):
+        if mp.exists():
+            try:
+                made_with = json.loads(mp.read_text()).get("cell_valid_sha")
+            except Exception:            # noqa: BLE001
+                made_with = None
+            if made_with != valid_sha:
+                raise ValueError(
+                    f"{expt_ID}: the {tag} in {run_dir.name} was made without / with a different "
+                    f"cell filter than the current cell_valid.npy. Re-run: run_glm.py --stages "
+                    f"ablation,null,responders --overwrite ablation,null,responders")
+
+    is_resp  = valid & np.isfinite(dR2_real) & (dR2_real > thr)
     resp_idx = np.where(is_resp)[0]
     n_resp   = resp_idx.size
     n_cells  = dR2_real.size

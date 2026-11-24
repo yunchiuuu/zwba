@@ -101,6 +101,7 @@ from chemogenetic.dprime import (
 )
 from utils.data_io import fish_dir
 from utils.run_guard import RunGuard, guarded, require_paths, run_main, setup_or_exit
+from chemogenetic.cell_filter import ensure_cell_valid, filter_params
 from chemogenetic.epochs import get_epochs
 
 # Analysis epochs (config-driven): first EPOCH_DISCARD_MIN of each phase discarded.
@@ -631,6 +632,13 @@ def main():
          for f in all_fish],
         "d′ input F_phasic",
     )
+
+    # Cell filter (cell_valid.npy): normally written by run_decompose.py; built here if missing or
+    # stale. Excluded cells get NaN d′ and are left out of the IAAFT null.
+    print(f"  cell filter    : {filter_params(cfg)}")
+    for fish in all_fish:
+        with guard.attempt(f"cell filter: {fish[1]}"):
+            ensure_cell_valid(fish_dir(dir_analysis, fish), EPOCHS, cfg, verbose=False)
 
     # ── Compute d′ ───────────────────────────────────────────
     if RUN_DPRIME:

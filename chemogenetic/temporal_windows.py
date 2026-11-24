@@ -30,6 +30,7 @@ from pathlib import Path
 
 import numpy as np
 
+from chemogenetic.cell_filter import mask_rows
 from chemogenetic.epochs import (   # noqa: F401  (re-exported for the run scripts)
     Epochs,
     N_WINDOWS,
@@ -57,10 +58,13 @@ def _windowed_effect(arr: np.ndarray, epochs: Epochs):
 # ── tonic ΔZ ──────────────────────────────────────────────────────────────
 
 def compute_epoch_dz(
-    f_tonic: np.ndarray, epochs: Epochs,
+    f_tonic: np.ndarray, epochs: Epochs, valid: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Per-cell tonic ΔZ for each temporal window.
+
+    valid : optional bool mask (chemogenetic/cell_filter.py). Cells with valid == False get
+            NaN in `dz` (rows are kept, so indices still match the medoid coordinates).
 
     Returns
     -------
@@ -68,14 +72,20 @@ def compute_epoch_dz(
     mu_baseline, sigma_baseline : (n_cells,) float32   (for QC)
     """
     dz, mu_bl, sd_bl = _windowed_effect(f_tonic, epochs)
+    if valid is not None:
+        dz = mask_rows(dz, valid)
     return dz, mu_bl.astype(np.float32), sd_bl.astype(np.float32)
 
 
 # ── phasic d' per window ───────────────────────────────────────────────────
 
-def compute_epoch_dprime(f_phasic: np.ndarray, epochs: Epochs) -> np.ndarray:
-    """Per-cell phasic effect size for each temporal window, (n_cells, n_windows) float32."""
+def compute_epoch_dprime(f_phasic: np.ndarray, epochs: Epochs,
+                         valid: np.ndarray | None = None) -> np.ndarray:
+    """Per-cell phasic effect size for each temporal window, (n_cells, n_windows) float32.
+    Cells with valid == False (cell_filter) get NaN."""
     dprime, _, _ = _windowed_effect(f_phasic, epochs)
+    if valid is not None:
+        dprime = mask_rows(dprime, valid)
     return dprime.astype(np.float32)
 
 
@@ -129,23 +139,27 @@ def load_epoch_dz(fish_analysis_dir: Path) -> np.ndarray:
 
 # ── cache provenance: epoch arrays are only valid for the epochs that made them ──
 
-def epochs_meta(epochs: Epochs) -> dict:
+def epochs_meta(epochs: Epochs, cell_valid_sha: str | None = None) -> dict:
     return {
         "baseline": [int(x) for x in epochs.baseline],
         "windows": [[lab, int(s), int(e)] for lab, s, e in epochs.windows],
         "discard_frames": int(epochs.discard_frames),
+        "cell_valid_sha": cell_valid_sha,     # fingerprint of cell_valid.npy used for the NaN rows
     }
 
 
-def save_epoch_meta(epochs: Epochs, fish_analysis_dir: Path) -> Path:
+def save_epoch_meta(epochs: Epochs, fish_analysis_dir: Path,
+                    cell_valid_sha: str | None = None) -> Path:
     import json
     out = Path(fish_analysis_dir) / "epoch_meta.json"
-    out.write_text(json.dumps(epochs_meta(epochs), indent=2))
+    out.write_text(json.dumps(epochs_meta(epochs, cell_valid_sha), indent=2))
     return out
 
 
-def epoch_cache_is_current(epochs: Epochs, fish_analysis_dir: Path) -> bool:
-    """True only if epoch_dz/epoch_dprime exist AND were made with exactly these epochs."""
+def epoch_cache_is_current(epochs: Epochs, fish_analysis_dir: Path,
+                           cell_valid_sha: str | None = None) -> bool:
+    """True only if epoch_dz/epoch_dprime exist AND were made with exactly these epochs and
+    exactly this cell_valid mask (arrays made before the cell filter existed are recomputed once)."""
     import json
     d = Path(fish_analysis_dir)
     meta = d / "epoch_meta.json"
@@ -154,7 +168,7 @@ def epoch_cache_is_current(epochs: Epochs, fish_analysis_dir: Path) -> bool:
     if not meta.exists():
         return False        # legacy arrays of unknown provenance -> recompute once
     try:
-        return json.loads(meta.read_text()) == epochs_meta(epochs)
+        return json.loads(meta.read_text()) == epochs_meta(epochs, cell_valid_sha)
     except Exception:       # noqa: BLE001 — unreadable sidecar == not current
         return False
 

@@ -21,8 +21,15 @@ Stages (column) -> what is checked
     reg   registration warp + affine + registered_final + registration_meta.json whose template
                        sha256 equals the current template                      (⚠ = other template / no meta)
     dec   decompose    f_dark_scalar.npy, f_tonic.npy, f_phasic.npy
+    cell  cell filter  cell_valid.npy (+ meta) made from the current f_tonic, epochs and CELL_* thresholds
+                       (⚠ = thresholds / epochs / f_tonic changed since it was made; ✗ = run decompose,
+                       which only builds the filter when f_tonic / f_phasic already exist). Does not block
+                       other columns; ⚠ also appears on fit / null / dpr / dnul / map when that output was made
+                       without (or with a different) cell filter.
     med   medoids      medoids_all.npy, medoids_rot_all.npy, medoids_template_vox.npy
-    fit   GLM fit      glm/<param_folder_name>/kernel_delta_r2_fit.npy; ⚠ if RUN_META.json says
+    tdz   tonic ΔZ     tonic_dz_meta.json + responder idx files (stage F1) made with the current epochs, cell filter
+                       and TONIC_DZ_* settings
+    fit   GLM fit      (optional stage F2, shown with --glm) glm/<param_folder_name>/kernel_delta_r2_fit.npy; ⚠ if RUN_META.json says
                        the fit window differs from INCLUDED_BASELINE in the config
     null  GLM null     kernel_delta_r2_null__<NULL_TAG>.npy
     resp  GLM resp.    tonic_pos/neg_glm_<NULL_TAG>_nullp<RESPONDER_NULL_THRESH>_idxs.npy
@@ -35,6 +42,8 @@ Options
 -------
     --fish TEXT   only fish whose expt_ID contains TEXT
     --strict      exit 1 if any ✗ or ⚠ is shown (for scripts)
+    --glm         also show the optional GLM columns fit / null / resp (stage F2); hidden otherwise and
+                  then ignored by "Next" and --strict
 """
 
 from __future__ import annotations
@@ -53,6 +62,8 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--config", required=True, help="Module name under chemogenetic/config/")
 parser.add_argument("--fish", default=None, help="only fish whose expt_ID contains this text")
 parser.add_argument("--strict", action="store_true", help="exit 1 if anything is missing or stale")
+parser.add_argument("--glm", action="store_true",
+                    help="also show the optional GLM stage F2 columns (fit, null, resp); hidden by default")
 args = parser.parse_args()
 
 if args.config.endswith(".py") or "/" in args.config:
@@ -152,6 +163,36 @@ def check_fish(fish):
     else:
         r["dec"] = OK if _all(an_d, ["f_dark_scalar.npy", "f_tonic.npy", "f_phasic.npy"]) else MISSING
 
+    # cell filter: needs dec (cell_valid.npy is built by run_decompose.py, which skips the decomposition
+    # itself when f_tonic / f_phasic already exist). Informational: it does not block other columns.
+    mask_sha = None
+    if r["dec"] != OK:
+        r["cell"] = BLOCKED
+    else:
+        from chemogenetic.cell_filter import mask_status        # numpy -> needs the conda env
+        st, mask_sha, minfo = mask_status(an_d, EPOCHS, cfg)
+        if st == "ok":
+            r["cell"] = OK
+            if minfo and minfo.get("n_excluded", 0) > 0.01 * max(minfo.get("n_cells", 1), 1):
+                notes.append(f"{expt}: cell filter excludes {minfo['n_excluded']:,}/{minfo['n_cells']:,} cells "
+                             f"(> 1%) — check the decomposition QC")
+        elif st == "stale":
+            r["cell"] = STALE
+            notes.append(f"{expt}: cell_valid.npy was made from other thresholds / epochs / f_tonic "
+                         f"(run decompose, or any later stage, to rebuild it)")
+        else:
+            r["cell"] = MISSING
+
+    def _stale_vs_mask(path, what):
+        """True (and a note) if the sidecar at `path` was made with another mask than the current one."""
+        if mask_sha is None or not path.exists():
+            return False
+        made = (_json(path) or {}).get("cell_valid_sha")
+        if made != mask_sha:
+            notes.append(f"{expt}: {what} made without / with a different cell filter")
+            return True
+        return False
+
     # medoids: needs reg
     if r["reg"] not in (OK, STALE):
         r["med"] = BLOCKED
@@ -159,7 +200,21 @@ def check_fish(fish):
         r["med"] = OK if _all(an_d, ["medoids_all.npy", "medoids_rot_all.npy",
                                      "medoids_template_vox.npy"]) else MISSING
 
-    # GLM chain: needs dec
+    # tonic ΔZ responders (stage F1): needs dec; the cell filter is built by the script itself when missing
+    if r["dec"] != OK:
+        r["tdz"] = BLOCKED
+    else:
+        from chemogenetic.tonic_dz import tonic_dz_is_current, tonic_dz_params, META_NAME as _DZ_META
+        if mask_sha is not None and tonic_dz_is_current(an_d, EPOCHS, mask_sha, tonic_dz_params(cfg)):
+            r["tdz"] = OK
+        elif (an_d / _DZ_META).exists():
+            r["tdz"] = STALE
+            notes.append(f"{expt}: tonic ΔZ outputs were made with other epochs / cell filter / settings "
+                         f"(or are incomplete); run_tonic_dz.py recomputes them")
+        else:
+            r["tdz"] = MISSING
+
+    # GLM chain (optional stage F2): needs dec
     if r["dec"] != OK:
         r["fit"] = r["null"] = r["resp"] = BLOCKED
     else:
@@ -170,6 +225,10 @@ def check_fish(fish):
                 r["fit"] = STALE
                 notes.append(f"{expt}: GLM fit starts at vol {old} but INCLUDED_BASELINE="
                              f"{cfg.INCLUDED_BASELINE:g} gives vol {EXPECTED_FIT_START} (rebuild the GLM)")
+            elif _stale_vs_mask(glm_d / "RUN_META_ABLATION.json", "GLM ΔR² (ablation)"):
+                r["fit"] = STALE
+                notes.append(f"{expt}: re-run run_glm.py --stages ablation,null,responders "
+                             f"--overwrite ablation,null,responders")
             else:
                 r["fit"] = OK
         else:
@@ -178,7 +237,9 @@ def check_fish(fish):
             r["null"] = r["resp"] = BLOCKED
         else:
             r["null"] = OK if (glm_d / f"kernel_delta_r2_null__{NULL_TAG}.npy").exists() else MISSING
-            if r["null"] != OK:
+            if r["null"] == OK and _stale_vs_mask(glm_d / f"RUN_META_NULL__{NULL_TAG}.json", "GLM IAAFT null"):
+                r["null"] = STALE
+            if r["null"] not in (OK, STALE):
                 r["resp"] = BLOCKED
             else:
                 r["resp"] = OK if _all(an_d, [f"tonic_pos_glm_{NULL_TAG}_nullp{GLM_P}_idxs.npy",
@@ -189,11 +250,22 @@ def check_fish(fish):
         r["dpr"] = r["dnul"] = r["dres"] = BLOCKED
     else:
         r["dpr"] = OK if any(an_d.glob("phasic_dprime_cells_*.npy")) else MISSING
-        if r["dpr"] != OK:
+        if r["dpr"] == OK and any(_stale_vs_mask(m, "d′ cells") for m in an_d.glob("phasic_dprime_meta_*.json")):
+            r["dpr"] = STALE
+        elif r["dpr"] == OK and not any(an_d.glob("phasic_dprime_meta_*.json")) and mask_sha is not None:
+            r["dpr"] = STALE
+            notes.append(f"{expt}: d′ cells made without the cell filter (the d′ script recomputes them)")
+        if r["dpr"] not in (OK, STALE):
             r["dnul"] = r["dres"] = BLOCKED
         else:
             r["dnul"] = OK if (an_d / "phasic_dprime_null__iaaft.npy").exists() else MISSING
-            if r["dnul"] != OK:
+            if r["dnul"] == OK and mask_sha is not None:
+                if not (an_d / "phasic_dprime_null_meta.json").exists():
+                    r["dnul"] = STALE
+                    notes.append(f"{expt}: d′ null sampled without the cell filter (the d′ script recomputes it)")
+                elif _stale_vs_mask(an_d / "phasic_dprime_null_meta.json", "d′ null"):
+                    r["dnul"] = STALE
+            if r["dnul"] not in (OK, STALE):
                 r["dres"] = BLOCKED
             else:
                 r["dres"] = OK if _all(an_d, [f"phasic_pos_dprime_iaaft_nullp{DPR_P}_idxs.npy",
@@ -206,21 +278,25 @@ def check_fish(fish):
         r["map"] = MISSING
     else:
         from chemogenetic.temporal_windows import epochs_meta      # numpy -> needs the conda env
-        if _json(an_d / "epoch_meta.json") == epochs_meta(EPOCHS):
+        if _json(an_d / "epoch_meta.json") == epochs_meta(EPOCHS, mask_sha):
             r["map"] = OK
         else:
             r["map"] = STALE
             notes.append(f"{expt}: epoch_dz/epoch_dprime were made with different (or unrecorded) "
-                         f"epochs; the map script recomputes them")
+                         f"epochs / cell filter; the map script recomputes them")
     return r
 
 
-COLS = ["vol", "reg", "dec", "med", "fit", "null", "resp", "dpr", "dnul", "dres", "map"]
+COLS = (["vol", "reg", "dec", "cell", "med", "tdz"]
+        + (["fit", "null", "resp"] if args.glm else [])      # GLM = optional stage F2, hidden unless --glm
+        + ["dpr", "dnul", "dres", "map"])
 NEXT = {
     "vol":  "voluseg: sbatch run_voluseg.py per fish (README step 3)",
     "reg":  "bash registration/submit_registration_syn.sh --config config_registration",
     "dec":  f"bash chemogenetic/submit/submit_decompose.sh --config {args.config}",
+    "cell": f"bash chemogenetic/submit/submit_decompose.sh --config {args.config}   (only builds the missing cell filter)",
     "med":  f"bash chemogenetic/submit/submit_medoids.sh --config {args.config}",
+    "tdz":  f"bash chemogenetic/submit/submit_tonic_dz.sh --config {args.config}",
     "fit":  f"bash chemogenetic/submit/submit_glm.sh --config {args.config}",
     "null": f"bash chemogenetic/submit/submit_glm.sh --config {args.config}",
     "resp": f"bash chemogenetic/submit/submit_glm.sh --config {args.config}",
@@ -239,7 +315,11 @@ rows = [(f, check_fish(f)) for f in fish_list]
 
 w_name = max(len(f[1]) for f in fish_list)
 print(f"\nconfig: {args.config}   {len(fish_list)} fish   {EPOCHS.describe()}")
-print(f"GLM: {PARAM_FOLDER}  fit window starts at vol {EXPECTED_FIT_START}  null={NULL_TAG} p{GLM_P}   d′ null p{DPR_P}")
+from chemogenetic.tonic_dz import tonic_dz_params as _dzp
+_dz = _dzp(cfg)
+print(f"tonic responders (F1): top {_dz['top_percent']:g}% of |max ΔZ|, {_dz['n_strata']} σ strata   d′ null p{DPR_P}")
+if args.glm:
+    print(f"GLM (optional F2): {PARAM_FOLDER}  fit window starts at vol {EXPECTED_FIT_START}  null={NULL_TAG} p{GLM_P}")
 print(f"template: {template_path}" + ("" if TEMPLATE_SHA else "   (NOT FOUND)") + "\n")
 print(f"{'':{w_name}}  {'group':<10}" + " ".join(f"{c:>4}" for c in COLS))
 for fish, r in rows:

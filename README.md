@@ -8,7 +8,7 @@ and compares an experimental group against controls.
 ```
 raw TIFF ──► HDF5 volumes ──► voluseg (cells + traces) ──► ANTs SyN to shared template
                                                               │
-   brain maps ◄── responders (GLM + IAAFT null, d′) ◄── F_tonic / F_phasic ◄─┘
+   brain maps ◄── responders (tonic: top-p% |ΔZ|; phasic: d′ + IAAFT null) ◄── F_tonic / F_phasic ◄─┘
 ```
 
 Written for the Prober lab Resnick HPC (SLURM). Everything below runs **from the repo root**.
@@ -34,13 +34,13 @@ bash chemogenetic/submit/status.sh --config config_<exp>
 | C | registration to template | `bash registration/submit_registration_syn.sh --config config_registration` | B | **open every `qc_registration_overlay.pdf`** |
 | D | decompose (F_tonic / F_phasic) | `bash chemogenetic/submit/submit_decompose.sh --config config_<exp>` | B | **open every `decompose_QC.png`** |
 | E | medoids → template coordinates | `bash chemogenetic/submit/submit_medoids.sh --config config_<exp>` | C | status shows ✔ in `med` |
-| F | GLM + IAAFT null + tonic responders | `bash chemogenetic/submit/submit_glm.sh --config config_<exp>` | D | log ends `✅ complete … 0 failed` |
+| F1 | tonic responders (top-p% \|max ΔZ\| of `F_tonic`) | `bash chemogenetic/submit/submit_tonic_dz.sh --config config_<exp>` | D | log ends `✅ complete … 0 failed`; **argmax-window shares** printed per fish look sensible (see Step 6) |
 | G | phasic d′ + IAAFT + group figures | `bash chemogenetic/submit/submit_dprime.sh --config config_<exp>` | D | log ends `✅ complete … 0 failed` |
-| H | GLM figures | `bash chemogenetic/submit/submit_figures_glm.sh --config config_<exp>` | F | responder fraction in controls is near the false-positive rate (≈ 1 − p/100) |
-| I | maps | `submit_temporal_intensity_map.sh`, `submit_glm_dprime_map.sh`, `submit_kernel_map.sh`, `submit_combined_fish_map.sh`, `submit_survey_by_regions.sh` | E, F, G | per-fish N shown on the maps |
+| H1 | tonic ΔZ figures | `bash chemogenetic/submit/submit_figures_tonic_dz.sh --config config_<exp>` | F1 | **argmax-window histogram** is not dominated by washout windows; σ-vs-\|ΔZ\| shows no flat-baseline cloud |
+| I | maps | `submit_temporal_intensity_map.sh`, `submit_glm_dprime_map.sh`, `submit_kernel_map.sh`, `submit_combined_fish_map.sh`, `submit_survey_by_regions.sh` | E, F1, G | per-fish N shown on the maps |
 
-C and D are independent of each other and can run at the same time; F and G can too. (Section 2 groups these stages into differently numbered steps.)
-Registration (C), decompose (D), medoids (E), GLM (F) and d′ (G) skip fish whose outputs already exist; use `--overwrite`, `--stages` or the `OVERWRITE_*` constants to redo. Maps cache their epoch arrays and recompute them when the epochs change.
+C and D are independent of each other and can run at the same time; F1 and G can too. The GLM (optional stage F2, `submit_glm.sh`, with its figures H2 `submit_figures_glm.sh` and the kernel map) is **not** part of the default run; see Step 6. (Section 2 groups these stages into differently numbered steps.)
+Registration (C), decompose (D), medoids (E), tonic ΔZ (F1) and d′ (G) skip fish whose outputs already exist; use `--overwrite`, `--stages` or the `OVERWRITE_*` constants to redo. Maps cache their epoch arrays and recompute them when the epochs change.
 A failed fish never stops the batch, but the job exits with code 1 and the end of the log lists every failure.
 
 ### Reading the status table
@@ -49,6 +49,7 @@ A failed fish never stops the batch, but the job exits with code 1 and the end o
 bash chemogenetic/submit/status.sh --config config_<exp>               # all fish in the config
 bash chemogenetic/submit/status.sh --config config_<exp> --fish fish3   # only expt_IDs containing "fish3"
 bash chemogenetic/submit/status.sh --config config_<exp> --strict       # exit code 1 if anything is missing or stale
+bash chemogenetic/submit/status.sh --config config_<exp> --glm          # also show the optional GLM columns (fit/null/resp)
 ```
 It only reads files (nothing is submitted or created) and takes a few seconds. One row per fish, one column per stage:
 
@@ -57,8 +58,10 @@ It only reads files (nothing is submitted or created) and takes a few seconds. O
 | `vol` | voluseg | `cells0_clean.hdf5` and `volume0.hdf5` exist |
 | `reg` | registration | warp, affine and registered image exist, and `registration_meta.json` records the current template |
 | `dec` | decompose | `f_dark_scalar.npy`, `f_tonic.npy`, `f_phasic.npy` |
+| `cell` | cell filter | `cell_valid.npy` made from the current `f_tonic.npy`, epochs and `CELL_*` thresholds (⚠ = any of them changed; ✗ = run decompose, it only builds the filter). Does not block other columns |
 | `med` | medoids | `medoids_all.npy`, `medoids_rot_all.npy`, `medoids_template_vox.npy` |
-| `fit`, `null`, `resp` | GLM fit, IAAFT null, responder calls | files in `glm/<param_folder_name>/` and the `tonic_pos/neg_glm_…_nullp<N>_idxs.npy` files, with the p<N> from the config |
+| `tdz` | tonic ΔZ responders (F1) | `tonic_dz_*.npy` and `tonic_{pos,neg}_dz_top<p>_idxs.npy` made with the current epochs, cell filter and `TONIC_DZ_*` settings (⚠ = any of them changed; · = blocked until `dec` is done) |
+| `fit`, `null`, `resp` | optional GLM (F2); shown only with `--glm` | files in `glm/<param_folder_name>/` and the `tonic_pos/neg_glm_…_nullp<N>_idxs.npy` files, with the p<N> from the config |
 | `dpr`, `dnul`, `dres` | d′, its null, responder calls | `phasic_dprime_cells_*.npy`, the null file, `phasic_pos/neg_dprime_…_idxs.npy` |
 | `map` | epoch maps | `epoch_dz.npy` and `epoch_dprime.npy`, made with the current epochs |
 
@@ -71,12 +74,21 @@ It only reads files (nothing is submitted or created) and takes a few seconds. O
 
 Below the table, **Next** lists the command for each stage that has ✗ or ⚠ and how many fish it affects, and **Details**
 explains each ⚠ (different template, GLM fit window changed, epoch cache made with other epochs). A stage with a ⚠ in
-`map` just needs the map script re-run; a ⚠ in `fit` means the GLM must be rebuilt (see Step 6).
-`Next` does not know about fish you are deliberately leaving out; for the GLM use `--exclude` (Step 6).
+`map` just needs the map script re-run; a ⚠ in `tdz` means rerun `submit_tonic_dz.sh` (it recomputes by itself); a ⚠ in `fit` (`--glm` only) means the GLM must be rebuilt (see Step 6).
+A ⚠ on `tdz`, `fit`, `null`, `dpr`, `dnul` or `map` can also mean that output was made without (or with a different) cell filter; `tdz`, `dpr`, `dnul` and `map` are recomputed automatically by their scripts, the GLM needs the command shown under Step 6.
+`Next` does not know about fish you are deliberately leaving out; use `--exclude` (Step 6). The GLM columns are hidden by default and then ignored by `Next` and `--strict`.
 
 ---
 
 ## 0. Before you start
+
+**Get the code** (once, on the HPC login node):
+```bash
+cd ~
+git clone git@github.com:yunchiuuu/zwba.git zwba
+cd ~/zwba            # every command in this README runs from here
+```
+To update later: `cd ~/zwba && git pull`.
 
 **You need**
 - a Resnick HPC account with access to `/resnick/groups/Proberlab/`
@@ -191,7 +203,7 @@ SyN parameters, git commit).
 ### Step 5 — chemogenetic preprocessing (HPC)
 ```bash
 bash chemogenetic/submit/submit_decompose.sh --config config_<exp>
-#   -> f_dark_scalar.npy, f_tonic.npy, f_phasic.npy, QC_figures/decompose_QC.png
+#   -> f_dark_scalar.npy, f_tonic.npy, f_phasic.npy, cell_valid.npy, QC_figures/decompose_QC.png
 bash chemogenetic/submit/submit_medoids.sh --config config_<exp>      # needs step 4
 #   -> medoids_all.npy, medoids_rot_all.npy, medoids_template_vox.npy
 ```
@@ -199,26 +211,84 @@ Both skip fish whose outputs exist. To recompute, flip `OVERWRITE_*` at the top 
 `run_decompose.py` checks the recording length against the epochs, and warns when many samples are
 clipped at `F_dark` (>5 %) or `F_phasic` is non-finite (>2 %). Look at `decompose_QC.png` for every fish.
 
+**Cell filter (`cell_valid.npy`).** After the decomposition `run_decompose.py` writes a boolean mask per fish
+(True = keep). `f_tonic.npy` / `f_phasic.npy` are never modified. If they already exist the decomposition is
+skipped and only the mask is built, so re-running decompose on old fish is cheap. Every later stage applies the mask by
+setting the excluded cells' results to NaN (rows are kept, so indices still match the medoids): ΔZ / d′ maps and
+region surveys ignore them, they can never be responders, and the IAAFT nulls are sampled from valid cells only.
+The criteria use the **baseline epoch only** (min 20-45 by default), so they cannot depend on the drug effect:
+
+| Config setting (default) | Excludes a cell when |
+|---|---|
+| `CELL_MAX_ZERO_FRAC = 0.10` | more than 10 % of baseline samples have `F_tonic <= 0` (dim cells clipped by the `F_dark` subtraction) |
+| `CELL_MIN_BASELINE_SD = 1e-3` | the baseline SD of `F_tonic` is below this (ΔZ divides by it, a flat baseline gives ΔZ ~ 1e7) |
+| `CELL_MIN_BASELINE_MEAN = 1.0` | the baseline mean of `F_tonic` is below this many counts |
+| non-finite values | any NaN / inf in the baseline epoch (always on) |
+| `CELL_MAX_ABS_DZ = 200` | backstop for cells that passed the four checks above: max over the temporal windows of \|tonic ΔZ\| exceeds this (`None` = off) |
+
+The log, `cell_valid_meta.json` and the status table report how many cells each criterion removed, and the ids of
+cells caught only by the ΔZ backstop. `run_decompose.py` warns when more than 1 % of a fish's cells are excluded.
+The thresholds are deliberately conservative (they target cells at the camera floor, not dim cells); check the counts
+before tightening them. The mask is rebuilt automatically when the thresholds, the epochs or `f_tonic.npy` change, and
+its fingerprint is stored with every downstream output, so results made with another mask are detected:
+`d′`, its null and the maps recompute themselves; the GLM stops and prints
+`--stages ablation,null,responders --overwrite ablation,null,responders` (the refit does not depend on the mask).
+Not covered: the CV stage (`--stages cv`) still samples its 2000 hyperparameter cells from all cells.
+
 ### Step 6 — responder statistics (HPC)
 ```bash
-bash chemogenetic/submit/submit_glm.sh    --config config_<exp>   # GLM + IAAFT null + tonic responders
-bash chemogenetic/submit/submit_dprime.sh --config config_<exp>   # phasic d′ + IAAFT + group figures
+bash chemogenetic/submit/submit_tonic_dz.sh        --config config_<exp>   # F1: tonic responders (top-p% |max ΔZ| of F_tonic)
+bash chemogenetic/submit/submit_dprime.sh          --config config_<exp>   # G: phasic d′ + IAAFT + group figures
+bash chemogenetic/submit/submit_figures_tonic_dz.sh --config config_<exp>  # H1: after F1 finishes; open all three PNGs
+```
+**F1, tonic responders.** Per cell, `ΔZ_w = (mean F_tonic in window w − baseline mean) / baseline σ` for each of the seven
+windows (section 4). `max ΔZ` is the ΔZ of the window with the largest |ΔZ| (sign kept). Valid cells (`cell_valid.npy`) are split
+into `TONIC_DZ_N_STRATA` (5) quantile strata of baseline σ, and within each stratum the top `TONIC_DZ_TOP_PERCENT` (5 %) of
+|max ΔZ| are the responders, positive or negative by the sign of `max ΔZ` (one pooled ranking). Sensitivity sets
+(`TONIC_DZ_TOP_PERCENT_SENS`, 2.5 % and 10 %) are saved in the same run. There is no null and no control-calibrated cutoff.
+
+Outputs per fish (`.npy`, in the fish analysis folder): `tonic_dz_windows.npy` (cells × 7), `tonic_dz_max.npy`,
+`tonic_dz_argmax_window.npy` (−1 = excluded cell), `tonic_dz_sigma_baseline.npy`, `tonic_dz_stratum.npy`,
+`tonic_{pos,neg}_dz_top{p}_idxs.npy` (`2p5` for 2.5) and `tonic_dz_meta.json` (cutoffs per stratum, inputs, counts).
+The run skips a fish whose meta matches the current epochs, cell filter and `TONIC_DZ_*` settings, and recomputes otherwise;
+`--overwrite` forces it. `run_tonic_dz.py` also takes `--fish TEXT` and `--exclude TEXT` (repeatable) and `--n-jobs`.
+
+**Because the cut is rank-based, the responder fraction is fixed by p (about p % of valid cells in every fish).** It carries
+no information and must not be compared between groups. Compare groups with the per-fish ECDFs of |max ΔZ| (H1),
+the region composition of the top sets, or the epoch maps, always with fish as the unit.
+
+**Check the argmax window.** `max` is taken over all seven windows, which include the washout (95–120 min, last two windows).
+The F1 log prints the share of cells peaking in each window and warns if more than half peak in the last two. If a washout or
+late whole-brain shift dominates, the top set is "late-shifted cells", not "drug responders"; look at the argmax histogram
+before using the sets.
+
+**F2, optional GLM** (not in the default run; the code is kept for the kernel map and the GLM figures, which depend on it
+only). It needs the regressor from section 6 in the config.
+```bash
+bash chemogenetic/submit/submit_glm.sh    --config config_<exp>   # GLM + IAAFT null + GLM tonic responders
 bash chemogenetic/submit/submit_figures_glm.sh --config config_<exp>   # after the GLM finishes
 ```
-`run_glm.py` and `run_dprime.py` take `--stages` and `--overwrite`; the submit scripts pass them through:
+`run_glm.py` and `run_dprime.py` take `--stages` and `--overwrite` (and `run_glm.py` also `--exclude TEXT` / `--fish TEXT`); the submit scripts pass them through:
 
 ```bash
 bash chemogenetic/submit/submit_glm.sh --config config_<exp> --stages responders             # redo only the responder call
 bash chemogenetic/submit/submit_glm.sh --config config_<exp> --stages refit,ablation,null,responders --overwrite refit,ablation,null,responders
 bash chemogenetic/submit/submit_dprime.sh --config config_<exp> --stages responders,figures
 ```
+The GLM needs `f_tonic.npy` for every fish in the config and stops (exit 2, nothing computed) if some are missing. While
+new fish are still being processed, leave them out explicitly; each fish is fitted independently, so the others are unaffected:
+```bash
+bash chemogenetic/submit/submit_glm.sh --config config_<exp> --exclude 260824 --exclude 260825   # text from their expt_ID
+```
+
 | Script | Valid stages | Default `--stages` | Default `--overwrite` |
 |---|---|---|---|
 | `run_glm.py` | `cv, refit, ablation, null, responders` | `refit,ablation,null,responders` | `responders` |
 | `run_dprime.py` | `dprime, null, responders, figures` | all four | `responders` |
+| `run_tonic_dz.py` | (single stage) | — | skips current fish; `--overwrite` redoes all |
 
 Existing outputs are skipped unless listed in `--overwrite`. The responder call uses
-`RESPONDER_NULL_THRESH` (GLM) and `PHASIC_RESPONDER_NULL_THRESH` (d′) from the config — both are IAAFT null
+`RESPONDER_NULL_THRESH` (GLM, F2) and `PHASIC_RESPONDER_NULL_THRESH` (d′) from the config — both are IAAFT null
 percentiles you can change (default 99); if only another percentile's threshold file exists, it is
 derived from the saved IAAFT null distribution (no surrogates are re-run).
 GLM outputs land in `{dir_analysis}/{proj}/{expt}/glm/in{input_tag}_K{K}_drift{d}_lam{λ}_lag{l}/`, plus
@@ -237,8 +307,8 @@ Then rerun `submit_figures_glm.sh` and the maps. Use a different `param_folder_n
 ### Step 7 — maps (all need `medoids_template_vox.npy`)
 ```bash
 bash chemogenetic/submit/submit_temporal_intensity_map.sh --config config_<exp>   # epoch_dz.npy, epoch_dprime.npy, per-window maps
-bash chemogenetic/submit/submit_glm_dprime_map.sh        --config config_<exp>   # N-fish presence maps
-bash chemogenetic/submit/submit_kernel_map.sh            --config config_<exp>   # kernel maps
+bash chemogenetic/submit/submit_glm_dprime_map.sh        --config config_<exp>   # N-fish presence maps (tonic = ΔZ top-p%; add --tonic-source glm for F2)
+bash chemogenetic/submit/submit_kernel_map.sh            --config config_<exp>   # kernel maps (needs F2)
 bash chemogenetic/submit/submit_combined_fish_map.sh     --config config_hcrt_trpv1_pooled_csn_120min
 bash chemogenetic/submit/submit_survey_by_regions.sh [--config config_<exp>] [--overwrite] [--top_n N]
 ```
@@ -297,7 +367,7 @@ the first `EPOCH_DISCARD_MIN` (default 20) minutes of each phase are discarded.
 | Temporal windows (`epoch_dz.npy`, `epoch_dprime.npy`) | seven 15-min windows, 10-min step, **starting at drug onset (not discarded)**, each compared with the baseline window above | 0–15, 10–25, … 60–75 after onset |
 
 Used by: `run_decompose.py` QC, `temporal_windows.py`, the temporal / survey maps, `run_dprime.py`,
-`run_figures_glm.py` and the GLM responder sign. All effect sizes are
+`run_tonic_dz.py`, `run_figures_glm.py` and the GLM responder sign. All effect sizes are
 `(μ_window − μ_baseline) / σ_baseline` per cell. For the epoch path, **"d′" is not a true d′**: it
 uses the baseline SD only (no pooled SD), i.e. it is ΔZ computed on `F_phasic`.
 
@@ -319,7 +389,8 @@ computed with. If you change `EPOCH_DISCARD_MIN` (or the timing), the maps recom
 caches without a sidecar (made before this change) are recomputed once.
 
 **Responder calls**
-- Tonic: GLM with IAAFT null at the 99th percentile (`RESPONDER_NULL_THRESH = 99`).
+- Tonic (default, F1): top `TONIC_DZ_TOP_PERCENT` % of |max ΔZ| of `F_tonic` within baseline-σ strata, rank-based, no null. The responder fraction is fixed by p and not comparable between groups.
+- Tonic (optional, F2): GLM with IAAFT null at the 99th percentile (`RESPONDER_NULL_THRESH = 99`).
 - Phasic: fixed `|d′| ≥ 0.5`, with the ctrl-pooled IAAFT p99 as validation.
 - Statistics must use **fish as the unit**, never cells.
 
@@ -334,6 +405,10 @@ caches without a sidecar (made before this change) are recomputed once.
   non-independent; the last windows (W5, W6) are most affected.
 - **Tonic σ_baseline is mostly slow drift**, so tonic ΔZ is not a pure noise-normalised
   effect size and can differ between fish for non-biological reasons.
+- **Washout windows are inside the |ΔZ| max.** Windows 6–7 (95–120 min) are washout and window 5 straddles drug end; a late shift can set `max ΔZ`. Check the argmax-window histogram (H1) per fish.
+- **Tonic ΔZ is asymmetric.** A 20th-percentile `F_tonic` follows decreases and increases differently, so positive and negative tails are not mirror images; compare signed `max ΔZ` ECDFs, not only |ΔZ|.
+- **Flat baselines inflate ΔZ.** The σ strata stop low-σ cells from filling the top set only if σ is not itself ~0; the cell filter removes the degenerate ones, the σ-vs-|ΔZ| plot shows the rest. Dim, edge and surface cells have the lowest σ.
+- **Top-p % always returns p %.** Controls will have responders too; judge a group by the ECDF shift and by which regions the top sets sit in, never by the count.
 - **Signed averaging cancels** at the voxel mean, the cross-fish mean and the Z/X projection.
   Strong responders of opposite sign can look flat in a mean map.
 - **No N-support masking in difference maps.** A voxel backed by 2 fish looks like one
@@ -342,9 +417,9 @@ caches without a sidecar (made before this change) are recomputed once.
 
 ---
 
-## 6. The GLM regressor (you define it in the config)
+## 6. The GLM regressor (optional stage F2 only; you define it in the config)
 
-There is no fallback regressor. Set in your config:
+The default pipeline (F1) does not use it. For F2 there is no fallback regressor. Set in your config:
 
 ```python
 regressor_files = ["/resnick/.../<fish>/hcrt_all.csv", ...]  # one CSV per reference recording
@@ -369,13 +444,19 @@ The same files draw the reference row of the temporal maps (z-scored on the base
 | `could not read PYTHON_BIN from chemogenetic/config/...` | run from the repo root and pass the config module name; your config needs `PYTHON_BIN` |
 | `PYTHON_BIN does not exist` | point `PYTHON_BIN` in the config at your conda env's `bin/python` |
 | `❌ <config> is missing required setting(s)` | copy the listed names from `config_template.py` (e.g. `EPOCH_DISCARD_MIN`, `regressor_files`) |
-| `Cannot load the GLM regressor` | the message lists each bad file (missing / no column / NaN / too short) |
+| `TONIC_DZ_N_STRATA must be >= 1` (or other `TONIC_DZ_*` error) | fix the setting in the config; valid: `0 < TONIC_DZ_TOP_PERCENT < 50`, `TONIC_DZ_N_STRATA >= 1` |
+| `no usable cells` for a fish (F1) | the cell filter removed everything: check `cell_valid_meta.json` and the `CELL_*` thresholds |
+| `⚠ more than 50 % of cells peak in the last two windows` (F1) | washout / late shift dominates `max ΔZ`; inspect the argmax histogram and the fish's traces before using the sets |
+| `Cannot load the GLM regressor` (F2) | the message lists each bad file (missing / no column / NaN / too short) |
 | `recording has N volumes but epochs need M` | wrong fish in the list or wrong `wash_end`/timing in the config |
 | Job `FAILED` in `sacct` | exit code 1 = some fish failed (see the summary at the end of the log); exit code 2 = bad config/input |
 | Registration submit says `--config is required` | pass a module name: `--config config_registration` |
 | Registration submits 0 jobs | all fish are already registered with the current template (see `--dry-run`), or commented out in `config_registration.py` |
 | Registered fish look misaligned | check `registration_meta.json` template sha256 vs. the current template; check the affine z-scale in the QC overlay (values far from ~1.0 are suspect) |
-| `Existing GLM outputs were fit with a different window` | `INCLUDED_BASELINE` changed since those fits; rebuild as in Step 6 |
+| `Existing GLM outputs were fit with a different window` (F2) | `INCLUDED_BASELINE` changed since those fits; rebuild as in Step 6 |
+| `cell_valid.npy is missing` | run `run_decompose.py` for that fish (existing `f_tonic` / `f_phasic` are skipped; only the filter is built) |
+| `Existing GLM outputs were made without (or with a different) cell filter` | the mask changed or the GLM predates it: `run_glm.py --stages ablation,null,responders --overwrite ablation,null,responders` |
+| Cell filter excludes > 1 % of cells | check `decompose_QC.png` and the `F_dark` clipping warning; thresholds are the `CELL_*` settings in the config |
 | GLM results differ from an older run | the fit window, regressor or threshold changed — rerun with `--stages refit,ablation,null,responders --overwrite refit,ablation,null,responders` |
 
 ---
@@ -395,6 +476,8 @@ chemogenetic/
   config/config_<exp>.py         per-experiment config (copy config_template.py)
   run/  submit/                  run scripts and their sbatch wrappers
   epochs.py regressor.py        the single epoch definition; the config-defined GLM regressor
+  cell_filter.py                valid-cell mask (cell_valid.npy) used by every stage after decompose
+  tonic_dz.py                   tonic ΔZ responders (stage F1): library, per-fish outputs, status check
   glm.py dprime.py temporal_windows.py drug_regressor.py brainmap.py kernel_map.py population.py scatter.py traces.py
 utils/  data_io.py  preprocess.py  stats.py  run_guard.py   (run_guard: failure railings used by every run script)
 ```

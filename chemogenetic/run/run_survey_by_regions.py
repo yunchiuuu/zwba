@@ -91,6 +91,7 @@ cfg = importlib.import_module(f"chemogenetic.config.{args.config}")
 
 from utils.data_io import fish_dir
 from utils.run_guard import RunGuard, setup_or_exit
+from chemogenetic.cell_filter import ensure_cell_valid
 from chemogenetic.epochs import get_epochs
 from chemogenetic.temporal_windows import (
     N_WINDOWS,
@@ -183,17 +184,18 @@ for group_tag, fish_list in all_groups.items():
     for fish in fish_list:
         f_dir = fish_dir(dir_analysis, fish)
         f_dir.mkdir(parents=True, exist_ok=True)
-        if epoch_cache_is_current(EPOCHS, f_dir):
-            continue
-        print(f"  Computing epochs for {fish[1]}...")
         with GUARD.attempt(fish[1]):
+            valid, valid_sha, _ = ensure_cell_valid(f_dir, EPOCHS, cfg, verbose=False)
+            if epoch_cache_is_current(EPOCHS, f_dir, valid_sha):
+                continue
+            print(f"  Computing epochs for {fish[1]} ({int((~valid).sum()):,} excluded cells -> NaN)...")
             f_tonic  = load_ftonic(f_dir)
             f_phasic = load_fphasic(f_dir)
-            dz, _, _ = compute_epoch_dz(f_tonic, EPOCHS)
-            dprime   = compute_epoch_dprime(f_phasic, EPOCHS)
+            dz, _, _ = compute_epoch_dz(f_tonic, EPOCHS, valid)
+            dprime   = compute_epoch_dprime(f_phasic, EPOCHS, valid)
             save_epoch_dz(dz, f_dir)
             save_epoch_dprime(dprime, f_dir)
-            save_epoch_meta(EPOCHS, f_dir)
+            save_epoch_meta(EPOCHS, f_dir, valid_sha)
             del f_tonic, f_phasic, dz, dprime
         gc.collect()
 print("  Epoch arrays ensured (failures, if any, are listed in the final summary).")

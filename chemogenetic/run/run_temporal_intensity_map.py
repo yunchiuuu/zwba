@@ -56,6 +56,7 @@ cfg = importlib.import_module(f"chemogenetic.config.{args.config}")
 
 from utils.data_io import fish_dir
 from utils.run_guard import RunGuard, setup_or_exit
+from chemogenetic.cell_filter import ensure_cell_valid
 from chemogenetic.epochs import get_epochs
 from chemogenetic.regressor import reference_traces
 from chemogenetic.temporal_windows import (
@@ -175,24 +176,25 @@ for group_tag, fish_list in all_groups.items():
         f_dir = fish_dir(dir_analysis, fish)
         f_dir.mkdir(parents=True, exist_ok=True)
 
-        if epoch_cache_is_current(EPOCHS, f_dir) and not RECOMPUTE_EPOCHS:
-            print(f"  ⏩ {expt_id}: epoch arrays cached (same epochs)")
-            continue
-        if (f_dir / "epoch_dz.npy").exists() and not RECOMPUTE_EPOCHS:
-            print(f"  ♻️  {expt_id}: cached epoch arrays have no matching epoch_meta.json "
-                  f"— recomputing so they are tied to the current epochs")
-
-        print(f"  {expt_id}: computing epochs...")
         with GUARD.attempt(expt_id):
+            valid, valid_sha, _ = ensure_cell_valid(f_dir, EPOCHS, cfg, verbose=False)
+            if epoch_cache_is_current(EPOCHS, f_dir, valid_sha) and not RECOMPUTE_EPOCHS:
+                print(f"  ⏩ {expt_id}: epoch arrays cached (same epochs, same cell filter)")
+                continue
+            if (f_dir / "epoch_dz.npy").exists() and not RECOMPUTE_EPOCHS:
+                print(f"  ♻️  {expt_id}: cached epoch arrays do not match the current epochs / "
+                      f"cell filter — recomputing")
+
+            print(f"  {expt_id}: computing epochs ({int((~valid).sum()):,} excluded cells -> NaN)...")
             f_tonic  = load_ftonic(f_dir)
             f_phasic = load_fphasic(f_dir)
 
-            dz, _, _ = compute_epoch_dz(f_tonic, EPOCHS)
-            dprime   = compute_epoch_dprime(f_phasic, EPOCHS)
+            dz, _, _ = compute_epoch_dz(f_tonic, EPOCHS, valid)
+            dprime   = compute_epoch_dprime(f_phasic, EPOCHS, valid)
 
             save_epoch_dz(dz, f_dir)
             save_epoch_dprime(dprime, f_dir)
-            save_epoch_meta(EPOCHS, f_dir)
+            save_epoch_meta(EPOCHS, f_dir, valid_sha)
             del f_tonic, f_phasic, dz, dprime
         gc.collect()
 
