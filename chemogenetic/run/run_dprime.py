@@ -17,6 +17,12 @@ Figures saved to:
         phasic_responder_fractions_{mode}.pdf
         phasic_dprime_amplitude_{mode}.pdf
 
+Phasic responders use a PER-FISH IAAFT null: every fish (ctrl and expt) gets its own null d′
+distribution from its own valid cells and its own threshold T = p{PHASIC_RESPONDER_NULL_THRESH} of |null d′|;
+a cell is a responder if its real |d′| > T of its own fish. The ctrl-pooled threshold is still
+computed, but only printed and drawn as a reference. Fish-level diagnostics (T per fish, real vs null,
+null heterogeneity) come from run_figures_dprime_null.py.
+
 Epochs: baseline = [baseline_start + EPOCH_DISCARD_MIN, baseline_end), drug =
 [drug_start + EPOCH_DISCARD_MIN, drug_end) — read from the config (chemogenetic/epochs.py).
 
@@ -134,7 +140,7 @@ RUN_FIGURES      = "figures" in STAGES
 OVERWRITE_NULL       = "null" in OVERWRITE_STAGES
 OVERWRITE_RESPONDERS = "responders" in OVERWRITE_STAGES   # default True so idx reflect the current null
 
-RESPONDER_NULL_THRESH = getattr(cfg, "PHASIC_RESPONDER_NULL_THRESH", 99)  # percentile, matches GLM convention
+RESPONDER_NULL_THRESH = getattr(cfg, "PHASIC_RESPONDER_NULL_THRESH", 99)  # percentile of |null d′| = per-fish threshold T
 N_SURROGATES  = 200
 N_ITER_IAAFT  = 50
 N_CELLS_NULL  = 20000
@@ -160,6 +166,36 @@ def _run_one(fish):
         clip_abs=CLIP_ABS,
         overwrite=OVERWRITE,
     )
+
+
+@guarded
+def _null_one(fish):
+    r = iaaft_null_dprime_one_fish(
+        fish=fish,
+        dir_analysis=dir_analysis,
+        baseline_start=baseline_start,
+        baseline_end=baseline_end,
+        drug_start=drug_start,
+        drug_end=DRUG_END_EXTENDED,
+        sampling_rate_hz=sampling_rate_hz,
+        offset_sec=OFFSET_SEC,
+        amplitude_mode=AMPLITUDE_MODE,
+        var_floor=VAR_FLOOR,
+        eps_var=EPS_VAR,
+        n_surrogates=N_SURROGATES,
+        n_iter_iaaft=N_ITER_IAAFT,
+        n_cells_null=N_CELLS_NULL,
+        null_percentile=RESPONDER_NULL_THRESH,
+        overwrite=OVERWRITE_NULL,
+        progress=False,          # fish run in parallel; per-fish bars would interleave in the log
+    )
+    return r
+
+
+def _fish_thr(fish, ptag):
+    """This fish's own threshold T (None if its null has not been run)."""
+    p = fish_dir(dir_analysis, fish) / f"phasic_dprime_iaaft_nullp{ptag}_thresh.npy"
+    return float(np.load(str(p))) if p.exists() else None
 
 
 # ============================================================
@@ -437,13 +473,11 @@ def _load_iaaft_responder_idx(fish, ptag):
     return pos_idx, neg_idx, n_cells
 
 
-def plot_iaaft_responder_fractions(ctrl_fish_list, expt_fish_list, fig_dir, ptag, pooled_thr):
+def plot_iaaft_responder_fractions(ctrl_fish_list, expt_fish_list, fig_dir, ptag, thr_by_fish, pooled_thr=None):
     """
-    Two-panel boxplot: fraction of cells classified as pos/neg responders
-    using a single ctrl-pooled IAAFT threshold applied to raw d′ for all fish.
-
-    The pooled threshold is derived from ctrl fish null distributions only,
-    so the question is "does this cell exceed ctrl-level noise?" for both groups.
+    Two-panel boxplot: fraction of valid cells classified as pos/neg responders, one point per
+    fish, each fish against its OWN IAAFT-null threshold T (thr_by_fish[expt_ID]).
+    pooled_thr (ctrl-pooled) is only quoted in the title as a reference.
     """
     ctrl_meta = PLOT_META[CTRL_TAG]
     expt_meta = PLOT_META[EXPT_TAG]
@@ -457,10 +491,11 @@ def plot_iaaft_responder_fractions(ctrl_fish_list, expt_fish_list, fig_dir, ptag
                 print(f"  ⚠️  {e} — skipping")
                 continue
             finite = dp[np.isfinite(dp)]
-            if finite.size == 0:
+            thr = thr_by_fish.get(fish[1])
+            if finite.size == 0 or thr is None:
                 continue
-            pos_f.append(float(np.mean(finite > pooled_thr)))
-            neg_f.append(float(np.mean(finite < -pooled_thr)))
+            pos_f.append(float(np.mean(finite > thr)))
+            neg_f.append(float(np.mean(finite < -thr)))
         return np.array(pos_f, dtype=float), np.array(neg_f, dtype=float)
 
     ctrl_pos, ctrl_neg = _fracs(ctrl_fish_list)
@@ -476,8 +511,8 @@ def plot_iaaft_responder_fractions(ctrl_fish_list, expt_fish_list, fig_dir, ptag
         axes,
         [ctrl_pos, ctrl_neg],
         [expt_pos, expt_neg],
-        [f"d′ > +{pooled_thr:.3f} (ctrl-pooled p{ptag})",
-         f"d′ < −{pooled_thr:.3f} (ctrl-pooled p{ptag})"],
+        [f"d′ > +T (per-fish IAAFT p{ptag})",
+         f"d′ < −T (per-fish IAAFT p{ptag})"],
     ):
         rng = np.random.default_rng(42)
         x_ctrl, x_expt = 0, 1
@@ -513,8 +548,11 @@ def plot_iaaft_responder_fractions(ctrl_fish_list, expt_fish_list, fig_dir, ptag
         ax.tick_params(axis="y", labelsize=9)
         ax.spines[["top", "right"]].set_visible(False)
 
-    fig.suptitle(f"Phasic Responder Fractions (ctrl-pooled IAAFT p{ptag})",
-                 fontsize=11, fontweight="bold", y=1.01)
+    _thr_txt = f"T per fish: {min(thr_by_fish.values()):.3f}–{max(thr_by_fish.values()):.3f}"
+    if pooled_thr is not None:
+        _thr_txt += f" | ctrl-pooled ref ±{pooled_thr:.3f}"
+    fig.suptitle(f"Phasic Responder Fractions (per-fish IAAFT p{ptag}; fraction of valid cells)\n{_thr_txt}",
+                 fontsize=10, fontweight="bold", y=1.04)
     plt.tight_layout()
 
     out = fig_dir / f"phasic_responder_fractions_iaaft_p{ptag}.png"
@@ -527,10 +565,10 @@ def plot_iaaft_responder_fractions(ctrl_fish_list, expt_fish_list, fig_dir, ptag
 # FIG 4 — IAAFT-NULL RESPONDER AMPLITUDE (mean d′ within responders)
 # ============================================================
 
-def plot_iaaft_responder_amplitude(ctrl_fish_list, expt_fish_list, fig_dir, ptag, pooled_thr):
+def plot_iaaft_responder_amplitude(ctrl_fish_list, expt_fish_list, fig_dir, ptag, thr_by_fish, pooled_thr=None):
     """
-    4-box plot: mean d′ within pos/neg responder cells classified by the
-    ctrl-pooled IAAFT threshold, ctrl vs expt.
+    4-box plot: mean d′ within pos/neg responder cells classified by each fish's own
+    IAAFT-null threshold, ctrl vs expt.
     """
     ctrl_meta = PLOT_META[CTRL_TAG]
     expt_meta = PLOT_META[EXPT_TAG]
@@ -544,10 +582,11 @@ def plot_iaaft_responder_amplitude(ctrl_fish_list, expt_fish_list, fig_dir, ptag
                 print(f"  ⚠️  {e} — skipping")
                 continue
             finite = dp[np.isfinite(dp)]
-            if finite.size == 0:
+            thr = thr_by_fish.get(fish[1])
+            if finite.size == 0 or thr is None:
                 continue
-            pos_cells = finite[finite > pooled_thr]
-            neg_cells = finite[finite < -pooled_thr]
+            pos_cells = finite[finite > thr]
+            neg_cells = finite[finite < -thr]
             if pos_cells.size > 0:
                 pos_amp.append(float(np.mean(pos_cells)))
             if neg_cells.size > 0:
@@ -596,7 +635,8 @@ def plot_iaaft_responder_amplitude(ctrl_fish_list, expt_fish_list, fig_dir, ptag
     ax.set_xticks(positions)
     ax.set_xticklabels(labels)
     ax.set_ylabel("Mean d′ within responder cells")
-    ax.set_title(f"Phasic responder d′ amplitude (ctrl-pooled IAAFT p{ptag}, thr=±{pooled_thr:.3f})")
+    ax.set_title(f"Phasic responder d′ amplitude (per-fish IAAFT p{ptag}, "
+                 f"T {min(thr_by_fish.values()):.3f}–{max(thr_by_fish.values()):.3f})", fontsize=10)
 
     y_all = np.concatenate([d for d in data if len(d) > 0])
     ymax, ymin = float(np.nanmax(y_all)), float(np.nanmin(y_all))
@@ -659,58 +699,21 @@ def main():
                 print(f"  {r['fish'][1]:50s}  {status}")
         guard.record_results("dprime", results)
 
-    # ── IAAFT null (window-label permutation, ctrl fish only) ───
-    # Only ctrl fish need per-fish null distributions; the pooled ctrl
-    # threshold derived from these is then applied to all fish for figures.
-    if RUN_IAAFT_NULL:
-        print("\n── d′ IAAFT null (ctrl fish only) ────────")
-        for fish in ctrl_fish:
-            try:
-                r = iaaft_null_dprime_one_fish(
-                    fish=fish,
-                    dir_analysis=dir_analysis,
-                    baseline_start=baseline_start,
-                    baseline_end=baseline_end,
-                    drug_start=drug_start,
-                    drug_end=DRUG_END_EXTENDED,
-                    sampling_rate_hz=sampling_rate_hz,
-                    offset_sec=OFFSET_SEC,
-                    amplitude_mode=AMPLITUDE_MODE,
-                    var_floor=VAR_FLOOR,
-                    eps_var=EPS_VAR,
-                    n_surrogates=N_SURROGATES,
-                    n_iter_iaaft=N_ITER_IAAFT,
-                    n_cells_null=N_CELLS_NULL,
-                    null_percentile=RESPONDER_NULL_THRESH,
-                    overwrite=OVERWRITE_NULL,
-                )
-                print(f"  {fish[1]:50s}  {r['status']}  thr=±{r['thresh']:.4f}")
-                guard.ok()
-            except Exception as e:   # recorded and re-reported in the final summary
-                guard.fail(f"null: {fish[1]}", f"{type(e).__name__}: {e}",
-                           traceback.format_exc())
-
-    # ── Ctrl-pooled IAAFT threshold ───────────────────────────
-    # Computed here so it's available for both responder idx and figures.
+    # ── Per-fish IAAFT null (window-label permutation, every fish) ───
     ptag = int(RESPONDER_NULL_THRESH)
-    print("\n── Computing ctrl-pooled IAAFT threshold ────")
-    try:
-        pooled_thr = compute_ctrl_pooled_threshold(
-            ctrl_fish, dir_analysis, null_percentile=RESPONDER_NULL_THRESH
+    if RUN_IAAFT_NULL:
+        print(f"\n── d′ IAAFT null, per fish (all {len(all_fish)} fish, p{ptag}) ────────")
+        null_results = Parallel(n_jobs=min(N_JOBS, len(all_fish)), backend="loky")(
+            delayed(_null_one)(fish) for fish in tqdm(all_fish, desc="d′ null (fish)")
         )
-    except RuntimeError as e:
-        guard.fail("ctrl-pooled IAAFT threshold",
-                   f"{e} — responder indices and IAAFT figures are skipped. "
-                   f"Run with --stages null (ctrl fish) first.")
-        pooled_thr = None
+        for r in null_results:
+            t = r.get("thresh")
+            print(f"  {r['fish'][1]:50s}  {r['status']}" + (f"  T=±{t:.4f}" if t is not None else ""))
+        guard.record_results("d′ null", null_results)
 
-    # ── Responder indices (all fish, ctrl-pooled threshold) ───
-    # All fish get responder indices saved using the ctrl-pooled threshold
-    # so downstream brain mapping uses a consistent classification.
-    # Ctrl fish additionally have their per-fish IAAFT null files on disk
-    # for QC purposes, but the saved idx here use the pooled threshold.
-    if RUN_RESPONDERS and pooled_thr is not None:
-        print("\n── d′ responder indices (all fish, ctrl-pooled thr) ─")
+    # ── Responder indices (every fish against its own T) ───────
+    if RUN_RESPONDERS:
+        print("\n── d′ responder indices (each fish vs its own T) ─")
 
         @guarded
         def _responders(fish):
@@ -719,16 +722,33 @@ def main():
                 dir_analysis=dir_analysis,
                 amplitude_mode=AMPLITUDE_MODE,
                 null_percentile=RESPONDER_NULL_THRESH,
-                external_thr=pooled_thr,
                 overwrite=OVERWRITE_RESPONDERS,
             )
 
-        resp_results = Parallel(n_jobs=N_JOBS, backend="loky")(
+        resp_results = Parallel(n_jobs=min(N_JOBS, len(all_fish)), backend="loky")(
             delayed(_responders)(fish) for fish in tqdm(all_fish, desc="d′ responders")
         )
         for r in resp_results:
             print(f"  {r['fish'][1]:50s}  {r['status']}")
         guard.record_results("d′ responders", resp_results)
+
+    # ── Per-fish thresholds, and the ctrl-pooled one as a reference only ──
+    thr_by_fish = {}
+    for fish in all_fish:
+        t = _fish_thr(fish, ptag)
+        if t is not None and np.isfinite(t):
+            thr_by_fish[fish[1]] = t
+    if thr_by_fish:
+        print(f"\n── per-fish thresholds T (p{ptag} of |null d′|) ────")
+        for fish in all_fish:
+            if fish[1] in thr_by_fish:
+                print(f"  {fish[1]:50s}  ±{thr_by_fish[fish[1]]:.4f}")
+    pooled_thr = None
+    try:
+        pooled_thr = compute_ctrl_pooled_threshold(
+            ctrl_fish, dir_analysis, null_percentile=RESPONDER_NULL_THRESH)
+    except RuntimeError as e:
+        print(f"  (ctrl-pooled reference threshold not available: {e})")
 
     if not RUN_FIGURES:
         guard.finish()
@@ -766,12 +786,14 @@ def main():
     # ── Fig 2: d′ amplitude (fixed ±0.5 threshold) ───────────
     plot_dprime_amplitude(ctrl_dprime, expt_dprime, fig_dir, AMPLITUDE_MODE)
 
-    # ── Fig 3: responder fractions (ctrl-pooled IAAFT null) ──
-    if pooled_thr is not None:
-        plot_iaaft_responder_fractions(ctrl_fish, expt_fish, fig_dir, ptag, pooled_thr)
+    # ── Fig 3: responder fractions (per-fish IAAFT null) ──
+    if thr_by_fish:
+        plot_iaaft_responder_fractions(ctrl_fish, expt_fish, fig_dir, ptag, thr_by_fish, pooled_thr)
 
-        # ── Fig 4: responder amplitude (ctrl-pooled IAAFT null) ──
-        plot_iaaft_responder_amplitude(ctrl_fish, expt_fish, fig_dir, ptag, pooled_thr)
+        # ── Fig 4: responder amplitude (per-fish IAAFT null) ──
+        plot_iaaft_responder_amplitude(ctrl_fish, expt_fish, fig_dir, ptag, thr_by_fish, pooled_thr)
+    else:
+        guard.fail("figures", "no per-fish IAAFT thresholds on disk — run --stages null first")
 
     guard.finish()
 

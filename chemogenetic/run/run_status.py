@@ -35,7 +35,7 @@ Stages (column) -> what is checked
     resp  GLM resp.    tonic_pos/neg_glm_<NULL_TAG>_nullp<RESPONDER_NULL_THRESH>_idxs.npy
     dpr   d′           phasic_dprime_cells_*.npy
     dnul  d′ null      phasic_dprime_null__iaaft.npy
-    dres  d′ resp.     phasic_pos/neg_dprime_iaaft_nullp<PHASIC_RESPONDER_NULL_THRESH>_idxs.npy
+    dres  d′ resp.     phasic_pos/neg_dprime_iaaft_nullp<PHASIC_RESPONDER_NULL_THRESH>_idxs.npy + phasic_dprime_responders_meta.json (per-fish threshold)
     map   epoch maps   epoch_dz.npy + epoch_dprime.npy; ⚠ if made with different epochs
 
 Options
@@ -270,6 +270,15 @@ def check_fish(fish):
             else:
                 r["dres"] = OK if _all(an_d, [f"phasic_pos_dprime_iaaft_nullp{DPR_P}_idxs.npy",
                                               f"phasic_neg_dprime_iaaft_nullp{DPR_P}_idxs.npy"]) else MISSING
+                if r["dres"] == OK:
+                    rm = _json(an_d / "phasic_dprime_responders_meta.json") or {}
+                    if rm.get("threshold_mode") != "per_fish" or rm.get("null_percentile") != DPR_P:
+                        r["dres"] = STALE
+                        notes.append(f"{expt}: d′ responders were called with the old ctrl-pooled threshold "
+                                     f"(or another percentile); rerun submit_dprime.sh — they use each fish's own null now")
+                    elif mask_sha is not None and rm.get("cell_valid_sha") != mask_sha:
+                        r["dres"] = STALE
+                        notes.append(f"{expt}: d′ responders made without / with a different cell filter")
 
     # epoch maps: need dec + med
     if r["dec"] != OK or r["med"] != OK:
@@ -317,7 +326,7 @@ w_name = max(len(f[1]) for f in fish_list)
 print(f"\nconfig: {args.config}   {len(fish_list)} fish   {EPOCHS.describe()}")
 from chemogenetic.tonic_dz import tonic_dz_params as _dzp
 _dz = _dzp(cfg)
-print(f"tonic responders (F1): top {_dz['top_percent']:g}% of |max ΔZ|, {_dz['n_strata']} σ strata   d′ null p{DPR_P}")
+print(f"tonic responders (F1): top {_dz['top_percent']:g}% of |max ΔZ|, {_dz['n_strata']} σ strata   d′ null p{DPR_P} (per fish)")
 if args.glm:
     print(f"GLM (optional F2): {PARAM_FOLDER}  fit window starts at vol {EXPECTED_FIT_START}  null={NULL_TAG} p{GLM_P}")
 print(f"template: {template_path}" + ("" if TEMPLATE_SHA else "   (NOT FOUND)") + "\n")

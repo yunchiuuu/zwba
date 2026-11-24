@@ -336,15 +336,20 @@ def iaaft_null_dprime_one_fish(
     null_percentile=99,
     seed=0,
     overwrite=False,
+    progress=True,
 ):
     """
-    Build an IAAFT-based null distribution for phasic d′ and save a
-    single symmetric magnitude threshold (matches notebook convention
-    of a symmetric ±thresh, e.g. ±0.5).
+    Build the PER-FISH IAAFT null distribution for phasic d′ and save this fish's own
+    symmetric magnitude threshold T = p{P} of |null d′| (every fish, ctrl and expt, gets its own T).
 
     Writes to dir_analysis / proj_ID / expt_ID /:
         phasic_dprime_iaaft_nullp{P}_thresh.npy   (scalar, float32)
         phasic_dprime_null__iaaft.npy             (n_surrogates, n_sample)
+        phasic_dprime_null_meta.json              cell_valid sha + null settings (n_surrogates, ...)
+
+    An existing null is reused when it was sampled with the current cell filter and the same
+    settings; if only the threshold for another percentile is missing, it is derived from the saved
+    null (no surrogates are re-run).
 
     Returns
     -------
@@ -367,13 +372,28 @@ def iaaft_null_dprime_one_fish(
 
     valid, valid_sha = load_cell_valid(out_dir, expected_n_cells=n_cells)
 
-    if not overwrite and thresh_path.exists():
-        if _sidecar_sha(null_meta) == valid_sha:
-            thr = float(np.load(str(thresh_path)))
-            print(f"⏩ {expt_ID}: d′ IAAFT null exists, thr=±{thr:.4f}")
-            return {"fish": fish, "status": "skipped", "thresh": thr}
+    settings = {"n_surrogates": int(n_surrogates), "n_iter_iaaft": int(n_iter_iaaft),
+                "n_cells_null": int(n_cells_null), "amplitude_mode": str(amplitude_mode)}
+    if not overwrite and null_path.exists() and null_meta.exists():
+        try:
+            stored = json.loads(null_meta.read_text())
+        except Exception:       # noqa: BLE001
+            stored = {}
+        # settings absent from an older sidecar are not compared (only the cell filter was recorded then)
+        same_settings = all(stored[k] == v for k, v in settings.items() if k in stored)
+        if stored.get("cell_valid_sha") == valid_sha and same_settings:
+            if thresh_path.exists():
+                thr = float(np.load(str(thresh_path)))
+                print(f"⏩ {expt_ID}: d′ IAAFT null exists, thr=±{thr:.4f}")
+                return {"fish": fish, "status": "skipped", "thresh": thr}
+            nv = np.load(str(null_path)).ravel()
+            nv = nv[np.isfinite(nv)]
+            thr = float(np.percentile(np.abs(nv), null_percentile)) if nv.size else np.nan
+            np.save(str(thresh_path), np.array(thr, dtype=np.float32))
+            print(f"✅ {expt_ID}: p{ptag} threshold derived from the saved null, thr=±{thr:.4f}")
+            return {"fish": fish, "status": "derived", "thresh": thr}
         print(f"♻️  {expt_ID}: d′ IAAFT null exists but was sampled without / with a different "
-              f"cell filter — recomputing")
+              f"cell filter or settings — recomputing")
 
     b_s, b_e = _get_window(baseline_start, baseline_end, sampling_rate_hz, offset_sec)
     d_s, d_e = _get_window(drug_start,     drug_end,     sampling_rate_hz, offset_sec)
@@ -405,7 +425,7 @@ def iaaft_null_dprime_one_fish(
 
     null_vals = np.empty((n_surrogates, n_sample), dtype=np.float32)
 
-    iterator = tqdm(range(n_surrogates), desc=f"{expt_ID} d′ IAAFT null", unit="surr")
+    iterator = tqdm(range(n_surrogates), desc=f"{expt_ID} d′ IAAFT null", unit="surr", disable=not progress)
     for s in iterator:
         surr_label = _iaaft_1d(label, n_iter=n_iter_iaaft, rng=rng)
         order = np.argsort(surr_label)                  # low → high
@@ -430,7 +450,8 @@ def iaaft_null_dprime_one_fish(
     np.save(str(thresh_path), np.array(thr, dtype=np.float32))
     np.save(str(null_path),   null_vals.astype(np.float32))
     null_meta.write_text(json.dumps({"cell_valid_sha": valid_sha,
-                                     "n_cells_sampled": int(n_sample)}, indent=2))
+                                     "n_cells_sampled": int(n_sample),
+                                     "seed": int(seed), **settings}, indent=2))
 
     print(f"✅ {expt_ID}: d′ IAAFT null done | n_surr={n_surrogates} "
           f"n_cells={n_sample} | thr(p{ptag})=±{thr:.4f}")
@@ -455,15 +476,17 @@ def save_dprime_responder_idx(
 ):
     """
     Classify cells as positive/negative phasic responders by comparing
-    each cell's real d′ against a symmetric threshold.
+    each cell's real d′ against this fish's own symmetric IAAFT-null threshold T
+    (phasic_dprime_iaaft_nullp{P}_thresh.npy). The null must have been sampled with the
+    current cell filter; otherwise this stops and asks for the null stage.
 
-    If external_thr is provided (e.g. a ctrl-pooled IAAFT threshold),
-    that value is used directly and the per-fish threshold file is ignored.
-    Otherwise the per-fish IAAFT null threshold file is loaded from disk.
+    external_thr is only for tests/what-if runs: it overrides T and the result is marked
+    threshold_mode="external" in the sidecar (the status table then shows the responders as stale).
 
     Writes to dir_analysis / proj_ID / expt_ID /:
         phasic_pos_dprime_iaaft_nullp{P}_idxs.npy
         phasic_neg_dprime_iaaft_nullp{P}_idxs.npy
+        phasic_dprime_responders_meta.json   threshold_mode, T, percentile, cell_valid sha, counts
 
     Returns
     -------
@@ -477,9 +500,21 @@ def save_dprime_responder_idx(
     pos_path    = out_dir / f"phasic_pos_dprime_iaaft_nullp{ptag}_idxs.npy"
     neg_path    = out_dir / f"phasic_neg_dprime_iaaft_nullp{ptag}_idxs.npy"
 
-    if not overwrite and pos_path.exists() and neg_path.exists():
-        print(f"⏩ {expt_ID}: d′ responder idx exist, skipping.")
-        return {"fish": fish, "status": "skipped"}
+    resp_meta = out_dir / "phasic_dprime_responders_meta.json"
+    n_cells_all = np.load(str(dprime_path), mmap_mode="r").shape[0] if dprime_path.exists() else None
+    valid, valid_sha = (None, None)
+    if n_cells_all is not None:
+        valid, valid_sha = load_cell_valid(out_dir, expected_n_cells=n_cells_all)
+
+    if not overwrite and pos_path.exists() and neg_path.exists() and resp_meta.exists():
+        try:
+            old = json.loads(resp_meta.read_text())
+        except Exception:       # noqa: BLE001
+            old = {}
+        if (old.get("threshold_mode") == "per_fish" and old.get("cell_valid_sha") == valid_sha
+                and old.get("null_percentile") == ptag):
+            print(f"⏩ {expt_ID}: d′ responder idx exist, skipping.")
+            return {"fish": fish, "status": "skipped"}
 
     if not dprime_path.exists():
         raise FileNotFoundError(f"Missing d′ cells for {expt_ID}: {dprime_path}")
@@ -491,7 +526,12 @@ def save_dprime_responder_idx(
         if not thresh_path.exists():
             raise FileNotFoundError(
                 f"Missing IAAFT threshold for {expt_ID}: {thresh_path}\n"
-                "Run iaaft_null_dprime_one_fish() first, or pass external_thr."
+                "Run the null stage for this fish first: run_dprime.py --stages null"
+            )
+        if _sidecar_sha(out_dir / "phasic_dprime_null_meta.json") != valid_sha:
+            raise RuntimeError(
+                f"{expt_ID}: the d′ null was sampled without / with a different cell filter — "
+                "run run_dprime.py --stages null (it recomputes the stale null) before the responders"
             )
         thr = float(np.load(str(thresh_path)))
 
@@ -502,11 +542,16 @@ def save_dprime_responder_idx(
     np.save(str(pos_path), pos_idx)
     np.save(str(neg_path), neg_idx)
 
-    n_cells = dprime_cells.size
+    n_cells = int(np.isfinite(dprime_cells).sum())          # fractions are of valid cells
+    resp_meta.write_text(json.dumps({
+        "threshold_mode": "external" if external_thr is not None else "per_fish",
+        "thresh": thr, "null_percentile": ptag, "cell_valid_sha": valid_sha,
+        "n_valid_cells": n_cells, "n_pos": int(pos_idx.size), "n_neg": int(neg_idx.size),
+    }, indent=2))
     print(
         f"✅ {expt_ID}: d′ responders | thr=±{thr:.4f} | "
-        f"POS {pos_idx.size} ({pos_idx.size/n_cells*100:.2f}%) "
-        f"NEG {neg_idx.size} ({neg_idx.size/n_cells*100:.2f}%)"
+        f"POS {pos_idx.size} ({pos_idx.size/max(n_cells,1)*100:.2f}% of valid) "
+        f"NEG {neg_idx.size} ({neg_idx.size/max(n_cells,1)*100:.2f}% of valid)"
     )
 
     return {
@@ -525,9 +570,8 @@ def compute_ctrl_pooled_threshold(ctrl_fish_list, dir_analysis, null_percentile=
     Pool surrogate d′ values across all ctrl fish null distributions and
     return the p{null_percentile} of |d′_null| as a single scalar threshold.
 
-    This threshold is used for group-comparison figures so that both ctrl
-    and expt fish are classified against a common ctrl-level noise bar,
-    rather than each fish's own per-fish noise floor.
+    REFERENCE ONLY since responders use each fish's own threshold: this is the common
+    ctrl-level noise bar, shown next to the per-fish thresholds as a validation.
 
     Reads: fish_dir(dir_analysis, fish) / phasic_dprime_null__iaaft.npy
            shape: (n_surrogates, n_cells_sampled)
