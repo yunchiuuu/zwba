@@ -44,7 +44,7 @@ bash chemogenetic/submit/status.sh --config config_<exp>
 | G2 | d′ null diagnostics | `bash chemogenetic/submit/submit_figures_dprime_null.sh --config config_<exp>` | G | real \|d′\| tail rises above the null in the expt fish and not in ctrl; **null SD spread** (p95/p5) is below ~3 |
 | H1 | tonic ΔZ figures | `bash chemogenetic/submit/submit_figures_tonic_dz.sh --config config_<exp>` | F1 | **argmax-window histogram** is not dominated by washout windows; σ-vs-\|ΔZ\| shows no flat-baseline cloud |
 | H2 (optional) | GLM figures | `bash chemogenetic/submit/submit_figures_glm.sh --config config_<exp>` | F2 | responder fraction in controls is near the false-positive rate (≈ 1 − p/100) |
-| I | maps (the kernel map needs F2) | `submit_temporal_intensity_map.sh`, `submit_presence_maps.sh` (+ optional `submit_tonic_overlap.sh`, `submit_temporal_zplanes.sh`), `submit_kernel_map.sh`, `submit_combined_fish_map.sh`, `submit_survey_by_regions.sh` | E, F1, G | per-fish N shown on the maps |
+| I | maps (the kernel map needs F2) | `submit_temporal_intensity_map.sh`, `submit_temporal_zplanes.sh`, `submit_presence_maps.sh` (+ optional `submit_tonic_overlap.sh`), `submit_kernel_map.sh`, `submit_combined_fish_map.sh`, `submit_survey_by_regions.sh` | E, F1, G | per-fish N shown on the maps |
 
 **The three responder methods in one line each** (full notes, null definitions and pros/cons: Part 4):
 - **F1** tonic ΔZ: top 5 % of |max ΔZ| per baseline-σ stratum, **per fish, rank-based, no null**; the responder fraction is fixed by p and carries no information.
