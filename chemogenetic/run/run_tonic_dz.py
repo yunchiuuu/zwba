@@ -93,19 +93,42 @@ def main():
         delayed(_run_one)(f, EPOCHS, PARAMS, args.overwrite) for f in all_fish)
     guard.record_results("tonic ΔZ", results)
 
-    ok = [r for r in results if r.get("status") == "ok"]
-    if ok:
-        tot = np.sum([r["argmax_hist"] for r in ok], axis=0)
-        share = 100 * tot / max(tot.sum(), 1)
-        print("\nArgmax-window share of ALL cells (0-based window: share):")
-        for (lab, s, e), sh in zip(EPOCHS.windows, share):
-            print(f"   {lab:>10s}  (abs {s / 60:g}-{e / 60:g}): {sh:5.1f}%")
-        late = share[-2:].sum()
-        if late > 50:
-            guard.warn("argmax windows", f"{late:.0f}% of cells peak in the last two windows (washout). The "
-                                         f"max-over-windows ranking is then dominated by washout / late "
-                                         f"whole-brain shifts rather than the drug phase; look at "
-                                         f"run_figures_tonic_dz.py before using the sets.")
+    # Argmax-window shares per fish, read from the SAVED arrays so the table is the same whether a fish was
+    # just computed or skipped (a re-run overwrites the sbatch log, so this table is printed every time).
+    ctrl_set = {f[1] for f in cfg.ctrl_fish}
+    nwin = EPOCHS.n_windows
+    rows, late_fish = [], []
+    for fish in all_fish:
+        ap = fish_dir(dir_analysis, fish) / "tonic_dz_argmax_window.npy"
+        if not ap.exists():
+            continue
+        am = np.load(str(ap))
+        am = am[am >= 0]
+        if am.size == 0:
+            continue
+        sh = 100 * np.bincount(am, minlength=nwin) / am.size
+        rows.append((fish[1], "CTRL" if fish[1] in ctrl_set else "EXPT", sh))
+        if sh[-2:].sum() > 50:
+            late_fish.append((fish[1], sh[-2:].sum()))
+    if rows:
+        print("\nArgmax-window share per fish, % of valid cells whose |ΔZ| peaks in each window "
+              "(windows 6-7 = washout, 5 straddles drug end):")
+        print(f"  {'fish':46s} {'grp':4s} " + " ".join(f"w{i + 1:<4d}" for i in range(nwin)) + "  last2")
+        for name, grp, sh in rows:
+            print(f"  {name:46s} {grp:4s} " + " ".join(f"{x:5.1f}" for x in sh) + f"  {sh[-2:].sum():5.1f}")
+        for grp in ("CTRL", "EXPT"):
+            g = [sh for _, gr, sh in rows if gr == grp]
+            if g:
+                m = np.mean(g, axis=0)
+                print(f"  {'mean of ' + grp + ' fish':46s} {grp:4s} " + " ".join(f"{x:5.1f}" for x in m)
+                      + f"  {m[-2:].sum():5.1f}")
+        print(f"  (uniform = {100 / nwin:.1f}% per window; more than 50% in the last two windows triggers a warning)")
+    if late_fish:
+        guard.warn("argmax windows",
+                   f"{len(late_fish)} fish have more than 50% of cells peaking in the last two windows (washout): "
+                   + ", ".join(f"{n} ({v:.0f}%)" for n, v in late_fish)
+                   + ". For those fish the max-over-windows ranking is dominated by washout / late whole-brain "
+                     "shifts rather than the drug phase; look at run_figures_tonic_dz.py before using the sets.")
     guard.finish()
 
 
